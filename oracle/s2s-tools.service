@@ -1,0 +1,13 @@
+[Unit]
+Description=s2s tool API server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+ExecStart=/home/ubuntu/s2s/bin/python /home/ubuntu/s2s-tools/tool_server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,27 @@
+[Unit]
+Description=speech-to-speech voice server (CPU)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+EnvironmentFile=/home/ubuntu/.s2s_env
+ExecStart=/home/ubuntu/s2s/bin/speech-to-speech serve \
+  --host 0.0.0.0 --port 8765 \
+  --device cpu \
+  --stt faster-whisper \
+  --faster_whisper_stt_model_name small.en \
+  --faster_whisper_stt_compute_type int8 \
+  --llm_backend responses-api \
+  --model_name openai/gpt-oss-20b:groq \
+  --responses_api_base_url https://router.huggingface.co/v1 \
+  --responses_api_api_key ${HF_TOKEN} \
+  --responses_api_stream \
+  --tts kokoro \
+  --kokoro_voice af_heart \
+  --kokoro_lang_code a
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
