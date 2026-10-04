@@ -1,0 +1,33 @@
+# systemd unit: routed speech-to-speech server (Oracle Always-Free)
+# Reads secrets from /etc/s2s/env (chmod 600, root-owned):
+#   HF_TOKEN=...
+#   RUNPOD_API_KEY=...
+#   RUNPOD_STT_ENDPOINT_ID=...
+#   RUNPOD_TTS_ENDPOINT_ID=...
+[Unit]
+Description=Speech-to-speech server with RunPod GPU routing + CPU fallback
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/s2s-router
+EnvironmentFile=/etc/s2s/env
+ExecStart=/home/ubuntu/s2s-router/venv/bin/python /home/ubuntu/s2s-router/serve_routed.py \
+  --host 0.0.0.0 --port 8765 \
+  --stt runpod-routed --tts runpod-routed \
+  --faster_whisper_stt_model_name small.en \
+  --kokoro_voice af_heart \
+  --llm_backend responses-api \
+  --model_name "openai/gpt-oss-20b:groq" \
+  --responses_api_base_url "https://router.huggingface.co/v1" \
+  --responses_api_api_key "${HF_TOKEN}" \
+  --responses_api_stream
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/ubuntu/s2s-router/server.log
+StandardError=append:/home/ubuntu/s2s-router/server.log
+
+[Install]
+WantedBy=multi-user.target
