@@ -1,3 +1,0 @@
-# Extra Python deps for the Oracle router (the speech-to-speech install already
-# brings numpy/soundfile/scipy via its faster-whisper + kokoro extras).
-requests>=2.31
