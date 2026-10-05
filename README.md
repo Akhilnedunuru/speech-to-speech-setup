@@ -1,15 +1,44 @@
-# Part B — serverless GPU legs
+# Speech-to-Speech Voice Lab
 
-This is step 2 of the hybrid architecture (the repo's main path).
-Start with `oracle/` (Part A — the always-on box), then come back here.
+A real-time voice pipeline on Hugging Face's
+[`speech-to-speech`](https://github.com/huggingface/speech-to-speech),
+deployed as **one hybrid architecture**: a free always-on CPU box that routes
+STT/TTS to pay-per-use serverless GPUs, with local CPU fallback.
 
-- **`SETUP.md`** — the full guide: RunPod account → build/push the two images →
-  create the endpoints → wire the Oracle box to `runpod-routed` → verify.
-- **`runpod/stt/`** — Parakeet TDT 0.6B serverless endpoint (Dockerfile + handler).
-- **`runpod/tts/`** — Qwen3-TTS 1.7B serverless endpoint (Dockerfile + handler).
+```
+Mac ──ws──▶ Oracle Always-Free (24/7, $0): full CPU pipeline + GPU routers
+                  │   try GPU first ──cold/timeout/error──▶ CPU fallback
+                  └─ RunPod serverless GPUs (pay-per-second, $0 when idle)
+```
 
-The router files (`router_plugin.py`, `serve_routed.py`, `s2s-routed.service`)
-live in the top-level `oracle/` dir — they execute on the box, so they live
-with the box setup.
+**Setup: [`SETUP.md`](SETUP.md)** — the single end-to-end guide
+(Oracle box → GPU legs → Mac client → Colab alternative).
 
-Cost: ~$0.25–0.35/GPU-hour, billed per second, $0 when idle.
+## Layout
+
+| Dir | What |
+|---|---|
+| `oracle/` | Everything that runs on the box: setup script, systemd units, tool server, GPU router plugin |
+| `serverless-gpu/runpod/` | The two RunPod endpoint builds (Dockerfiles + handlers) |
+| `colab/` | Colab T4 notebook (alternative path, no deploy) |
+| `mac/` | Thin client: `slow_tools.py` forwarder |
+
+## Architecture notes
+
+- The LLM is remote in every path (`openai/gpt-oss-20b:groq` via the HF
+  Inference Providers router) — no local GPU needed for the brain.
+- Tool *definitions* travel Mac → server → model; tool *execution* runs on the
+  server (`tool_server.py`, port 8766). Async pattern: tools never block the
+  turn — long jobs run in the background, results land on follow-up turns.
+- Per-stage latency is measurable from server logs — the pipeline is built
+  to be debugged stage by stage.
+
+## Secrets
+
+No secrets are stored in this repo.
+
+| Secret | Where it's read |
+|---|---|
+| `HF_TOKEN` | Colab Secrets (notebook); `/etc/s2s/env` on Oracle |
+| `RUNPOD_API_KEY`, `RUNPOD_STT_ENDPOINT_ID`, `RUNPOD_TTS_ENDPOINT_ID` | `/etc/s2s/env` on Oracle |
+| `NGROK_TOKEN`, `NGROK_DOMAIN` | Colab Secrets (notebook, Colab path only) |
