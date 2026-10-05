@@ -37,6 +37,11 @@ NATIVE_SR = 24000
 PIPELINE_SR = 16000
 
 logger.info("Loading Qwen3-TTS model: %s", MODEL_ID)
+try:
+    import importlib.metadata as _md
+    logger.info("faster-qwen3-tts version: %s", _md.version("faster-qwen3-tts"))
+except Exception:
+    pass
 from faster_qwen3_tts import FasterQwen3TTS  # noqa: E402
 
 dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
@@ -78,6 +83,9 @@ def _synthesize(text: str, language: str, speaker: str, instruct, max_new_tokens
         non_streaming_mode=False,
     )
     for chunk in stream:
+        # ggml backend yields (audio_chunk, sample_rate, info) tuples
+        if isinstance(chunk, (tuple, list)):
+            chunk = chunk[0]
         parts.append(_chunk_to_float32(chunk))
     audio = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
     if native_sr != PIPELINE_SR:

@@ -24,10 +24,12 @@ mic → Silero VAD → Smart Turn → STT → LLM (Groq, remote) → TTS → spe
 | TTS | Qwen3-TTS 1.7B | Kokoro 82M (`af_heart`) |
 | Tools | — | `tool_server.py` on :8766 |
 
-The router tries the GPU endpoint per turn with a short timeout. Cold start,
-timeout, or error → the turn is answered from CPU with zero added latency, and
-the GPU worker finishes warming for the next turn. A circuit breaker stops
-trying a dead endpoint for 5 minutes.
+The router races the GPU endpoint against local CPU every turn — first
+finisher wins. Cold GPU (slow) → CPU answers with zero added latency while
+the GPU request keeps warming the worker in the background, so the next
+turns hit a warm GPU. Warm GPU (fast) → GPU wins on quality. Only real GPU
+errors (not slowness) count toward the circuit breaker, which skips a dead
+endpoint for 5 minutes.
 
 **Cost:** Oracle $0 forever. RunPod ~$0.25–0.35/GPU-hour, billed per second —
 roughly $10–25/month at ~1 hr/day of talking, $0 when idle.
@@ -258,10 +260,10 @@ from Part A — keep it running as before.
 ### B7. Verification checklist
 
 1. **GPU path works:** talk one sentence → server.log shows
-   `STT via RunPod GPU` / `TTS via RunPod GPU` with timings.
+   `STT won by gpu` / `TTS won by gpu` with timings.
 2. **Cold start is invisible:** wait 10+ min idle (worker scaled to zero),
-   talk → first turn logs `RunPod STT failed (...)` + `CPU fallback`
-   (that's the 8 s timeout firing), second turn goes GPU. You hear no error.
+   talk → first turn logs `won by cpu` (GPU still booting, race lost with
+   no added latency), second turn goes `won by gpu`. You hear no error.
 3. **Breaker works:** stop both endpoints (or break the API key) → after
    3 failed turns, no more GPU attempts for 5 min; everything still answers.
 4. **Bill check:** RunPod console → Billing — after a day of tinkering you

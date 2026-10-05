@@ -7,7 +7,7 @@ STT/TTS to pay-per-use serverless GPUs, with local CPU fallback.
 
 ```
 Mac ──ws──▶ Oracle Always-Free (24/7, $0): full CPU pipeline + GPU routers
-                  │   try GPU first ──cold/timeout/error──▶ CPU fallback
+                  │   race GPU vs CPU per turn ──first finisher wins──▶
                   └─ RunPod serverless GPUs (pay-per-second, $0 when idle)
 ```
 

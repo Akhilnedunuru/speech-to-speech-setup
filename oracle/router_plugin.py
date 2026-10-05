@@ -3,16 +3,21 @@ GPU-routed STT/TTS backends for the Oracle 24/7 box.
 
 Registers two new backends with the speech-to-speech backend registry:
 
-    --stt runpod-routed    Parakeet TDT on RunPod serverless -> faster-whisper CPU fallback
-    --tts runpod-routed    Qwen3-TTS on RunPod serverless   -> Kokoro CPU fallback
+    --stt runpod-routed    Parakeet TDT on RunPod serverless, raced with faster-whisper CPU
+    --tts runpod-routed    Qwen3-TTS on RunPod serverless, raced with Kokoro CPU
 
-Per-turn behavior:
-  1. If the circuit breaker allows, POST to the RunPod endpoint (runsync)
-     with a short client-side timeout (GPU_ROUTE_TIMEOUT_S, default 8s).
-  2. On a cold start the server keeps booting the worker after our client
-     times out; this turn is answered from CPU, the NEXT turns hit the warm GPU.
-  3. Consecutive failures trip the breaker: the GPU leg is skipped for
-     GPU_ROUTE_COOLDOWN_S (default 300s) so a dead endpoint adds zero latency.
+Per-turn behavior (race, first finisher wins):
+  1. If the circuit breaker allows, fire BOTH the RunPod GPU request and the
+     local CPU inference at once; whichever finishes first answers the turn.
+  2. Cold GPU (slow) -> CPU wins with zero added latency. The abandoned GPU
+     request keeps warming the worker in the background, so the NEXT turns
+     hit a warm GPU.
+  3. Warm GPU (fast) -> GPU wins: better quality, and the background CPU
+     inference is simply discarded.
+  4. Only real GPU errors count toward the circuit breaker. A timeout just
+     means "cold", not "broken", so cold starts can never trip the breaker.
+  5. If the breaker is open (GPU known-dead), the GPU leg is skipped for
+     GPU_ROUTE_COOLDOWN_S and turns go pure CPU with zero added latency.
 
 The router subclasses the stock CPU handlers, so setup(), config flags and
 the queue/thread contract are inherited unchanged. Only process() is overridden.
@@ -21,8 +26,10 @@ Env:
   RUNPOD_API_KEY            RunPod API key (required)
   RUNPOD_STT_ENDPOINT_ID    serverless endpoint id for STT (required for --stt runpod-routed)
   RUNPOD_TTS_ENDPOINT_ID    serverless endpoint id for TTS (required for --tts runpod-routed)
-  GPU_ROUTE_TIMEOUT_S       per-request timeout, seconds (default 8)
-  GPU_ROUTE_MAX_FAILURES    failures before cooldown (default 3)
+  GPU_ROUTE_TIMEOUT_S       per-attempt cap on the GPU request, seconds (default 8).
+                            No longer user-facing: the race, not the timeout,
+                            decides each turn. Only bounds a wedged worker.
+  GPU_ROUTE_MAX_FAILURES    real GPU errors before cooldown (default 3)
   GPU_ROUTE_COOLDOWN_S      cooldown after tripping, seconds (default 300)
 """
 
@@ -33,7 +40,8 @@ import io
 import logging
 import os
 import time
-from typing import Any, Iterator
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from typing import Any, Callable, Iterator
 
 import numpy as np
 import requests
@@ -62,9 +70,13 @@ CODE_TO_QWEN3_LANG = {
 
 TTS_CHUNK_SAMPLES = 1600  # 100 ms @ 16 kHz
 
+# Shared pool for the race: at most one race per stage is ever in flight,
+# each race needs 2 threads (gpu + cpu).
+_race_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="gpu-race")
+
 
 class CircuitBreaker:
-    """Skip the GPU leg for COOLDOWN_S after MAX_FAILURES consecutive failures."""
+    """Skip the GPU leg for COOLDOWN_S after MAX_FAILURES consecutive real errors."""
 
     def __init__(self, name: str) -> None:
         self.name = name
@@ -83,7 +95,7 @@ class CircuitBreaker:
             self._cooldown_until = time.monotonic() + COOLDOWN_S
             self._failures = 0
             logger.warning(
-                "%s: circuit open for %.0fs after %d consecutive GPU failures",
+                "%s: circuit open for %.0fs after %d consecutive GPU errors",
                 self.name, COOLDOWN_S, MAX_FAILURES,
             )
 
@@ -127,38 +139,81 @@ def _wav_b64_to_int16(wav_b64: str) -> np.ndarray:
     return (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
 
 
+def _guard_gpu(name: str, breaker: CircuitBreaker, gpu_fn: Callable[[], list]) -> list:
+    """Run the GPU leg with breaker bookkeeping.
+
+    A timeout means the worker is cold, not broken: it is logged, re-raised
+    (so the race treats it as "lost"), and never counted as a failure.
+    """
+    try:
+        result = gpu_fn()
+    except requests.Timeout:
+        logger.info("%s: GPU leg timed out after %.0fs (cold worker?)", name, TIMEOUT_S)
+        raise
+    except Exception:
+        breaker.failure()
+        logger.warning("%s: GPU leg errored", name, exc_info=True)
+        raise
+    breaker.success()
+    return result
+
+
+def _race(name: str, breaker: CircuitBreaker,
+          gpu_fn: Callable[[], list], cpu_fn: Callable[[], list]) -> tuple[str, list]:
+    """Fire GPU and CPU at once; return (winner, result). First finisher wins.
+
+    The loser keeps running in the background: a losing GPU request warms the
+    worker for the next turn; a losing CPU inference is simply discarded.
+    If the first finisher raised, the other leg's result is used instead.
+    """
+    gpu_fut = _race_pool.submit(_guard_gpu, name, breaker, gpu_fn)
+    cpu_fut = _race_pool.submit(cpu_fn)
+    done, _ = wait([gpu_fut, cpu_fut], return_when=FIRST_COMPLETED)
+    first = next(iter(done))
+    try:
+        return ("gpu" if first is gpu_fut else "cpu"), first.result()
+    except Exception:
+        other = cpu_fut if first is gpu_fut else gpu_fut
+        # Blocks only until the remaining leg finishes; raises only if both failed.
+        return ("cpu" if first is gpu_fut else "gpu"), other.result()
+
+
 class RoutedSTTHandler(FasterWhisperSTTHandler):
-    """Try Parakeet-on-RunPod first; fall back to local faster-whisper."""
+    """Parakeet-on-RunPod raced with local faster-whisper; first finisher wins."""
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
+        parent_process = super().process
         if vad_audio.mode == "progressive" or not _stt_breaker.allow():
-            yield from super().process(vad_audio)
+            yield from parent_process(vad_audio)
             return
         started = time.perf_counter()
-        try:
-            out = _runsync(STT_ENDPOINT_ID, {"audio": _wav_b64(vad_audio.audio)})
-            _stt_breaker.success()
-            logger.info("STT via RunPod GPU in %.2fs", time.perf_counter() - started)
-            yield Transcription(
+        wav_b64 = _wav_b64(vad_audio.audio)
+
+        def _gpu() -> list:
+            out = _runsync(STT_ENDPOINT_ID, {"audio": wav_b64})
+            return [Transcription(
                 text=out["text"],
                 language_code=None,
                 turn_id=vad_audio.turn_id,
                 turn_revision=vad_audio.turn_revision,
                 speech_stopped_at_s=vad_audio.speech_end_at_s,
-            )
-            return
-        except Exception as exc:
-            _stt_breaker.failure()
-            logger.warning("RunPod STT failed (%s); CPU fallback", exc)
-        yield from super().process(vad_audio)
+            )]
+
+        def _cpu() -> list:
+            return list(parent_process(vad_audio))
+
+        winner, items = _race("stt", _stt_breaker, _gpu, _cpu)
+        logger.info("STT won by %s in %.2fs", winner, time.perf_counter() - started)
+        yield from items
 
 
 class RoutedTTSHandler(KokoroTTSHandler):
-    """Try Qwen3-TTS-on-RunPod first; fall back to local Kokoro."""
+    """Qwen3-TTS-on-RunPod raced with local Kokoro; first finisher wins."""
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
+        parent_process = super().process
         if isinstance(tts_input, EndOfResponse):
-            yield from super().process(tts_input)
+            yield from parent_process(tts_input)
             return
         # Mirror the parent's speculative-turn guard so a cancelled turn never
         # burns GPU time.
@@ -172,21 +227,25 @@ class RoutedTTSHandler(KokoroTTSHandler):
         if speculative_turns:
             speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
 
-        if _tts_breaker.allow():
-            started = time.perf_counter()
-            try:
-                lang = CODE_TO_QWEN3_LANG.get((tts_input.tts_language_code or "en").lower(), "english")
-                out = _runsync(TTS_ENDPOINT_ID, {"text": tts_input.text, "language": lang})
-                _tts_breaker.success()
-                logger.info("TTS via RunPod GPU in %.2fs", time.perf_counter() - started)
-                pcm16 = _wav_b64_to_int16(out["audio"])
-                for i in range(0, len(pcm16), TTS_CHUNK_SAMPLES):
-                    yield pcm16[i:i + TTS_CHUNK_SAMPLES]
-                return
-            except Exception as exc:
-                _tts_breaker.failure()
-                logger.warning("RunPod TTS failed (%s); CPU fallback", exc)
-        yield from super().process(tts_input)
+        if not _tts_breaker.allow():
+            yield from parent_process(tts_input)
+            return
+
+        started = time.perf_counter()
+        lang = CODE_TO_QWEN3_LANG.get((tts_input.tts_language_code or "en").lower(), "english")
+
+        def _gpu() -> list:
+            out = _runsync(TTS_ENDPOINT_ID, {"text": tts_input.text, "language": lang})
+            pcm16 = _wav_b64_to_int16(out["audio"])
+            return [pcm16[i:i + TTS_CHUNK_SAMPLES]
+                    for i in range(0, len(pcm16), TTS_CHUNK_SAMPLES)]
+
+        def _cpu() -> list:
+            return list(parent_process(tts_input))
+
+        winner, chunks = _race("tts", _tts_breaker, _gpu, _cpu)
+        logger.info("TTS won by %s in %.2fs", winner, time.perf_counter() - started)
+        yield from chunks
 
 
 def register_routed_backends() -> None:
