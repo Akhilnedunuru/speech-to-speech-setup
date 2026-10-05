@@ -27,10 +27,10 @@ At ~1 hr/day of talking ≈ **$10–25/month**. $0 when idle.
 **Files in this folder:**
 - `runpod/stt/` — Dockerfile + handler (Parakeet TDT, via `nano-parakeet`, same as Colab)
 - `runpod/tts/` — Dockerfile + handler (Qwen3-TTS ggml, same as Colab)
-- `oracle/router_plugin.py` — the two router backends + circuit breaker
-- `oracle/serve_routed.py` — launcher that registers them, then runs stock `serve`
-- `oracle/s2s-routed.service` — systemd unit
-- `oracle/requirements-router.txt` — one extra dep (`requests`)
+
+The router files (`router_plugin.py`, `serve_routed.py`, `s2s-routed.service`,
+`requirements-router.txt`) live in the top-level `oracle/` dir — they run on
+the box, so they live with the box setup. `SETUP.md` Part E wires them up.
 
 ---
 
@@ -113,12 +113,12 @@ SSH into the Oracle VM (Part A is already running there), then:
 
 ```bash
 # one extra dep, into the existing venv
-~/s2s/bin/pip install -r ~/serverless-gpu/oracle/requirements-router.txt
+~/s2s/bin/pip install -r ~/oracle/requirements-router.txt
 
-# router files (assumes you copied the serverless-gpu/ dir to the VM
-# alongside the oracle/ files, or cloned this repo there)
+# router files (they live in the repo's oracle/ dir — copy that dir to the VM
+# in Part A, or clone the repo there)
 mkdir -p ~/s2s-router
-cp ~/serverless-gpu/oracle/router_plugin.py ~/serverless-gpu/oracle/serve_routed.py ~/s2s-router/
+cp ~/oracle/router_plugin.py ~/oracle/serve_routed.py ~/s2s-router/
 
 # add the RunPod secrets to the same env file Part A created
 sudo tee -a /etc/s2s/env > /dev/null <<'EOF'
@@ -157,7 +157,7 @@ in the log, then the normal server startup.
 ## Part F — systemd (2 min)
 
 ```bash
-sudo cp ~/serverless-gpu/oracle/s2s-routed.service /etc/systemd/system/
+sudo cp ~/oracle/s2s-routed.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl stop s2s                     # pure-CPU service from Part A
 sudo systemctl enable --now s2s-routed

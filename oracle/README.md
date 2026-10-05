@@ -96,21 +96,20 @@ Once the CPU pipeline talks:
    the two images, create the endpoints, smoke-test).
 2. On the VM:
    ```bash
-   ~/s2s/bin/pip install -r ~/serverless-gpu/oracle/requirements-router.txt
+   ~/s2s/bin/pip install -r ~/oracle/requirements-router.txt
    mkdir -p ~/s2s-router
-   cp ~/serverless-gpu/oracle/router_plugin.py ~/serverless-gpu/oracle/serve_routed.py ~/s2s-router/
+   cp ~/oracle/router_plugin.py ~/oracle/serve_routed.py ~/s2s-router/
    sudo tee -a /etc/s2s/env > /dev/null <<'EOF'
    RUNPOD_API_KEY=<your-runpod-key>
    RUNPOD_STT_ENDPOINT_ID=<stt-endpoint-id>
    RUNPOD_TTS_ENDPOINT_ID=<tts-endpoint-id>
    EOF
-   sudo cp ~/serverless-gpu/oracle/s2s-routed.service /etc/systemd/system/
+   sudo cp ~/oracle/s2s-routed.service /etc/systemd/system/
    sudo systemctl daemon-reload
    sudo systemctl stop s2s && sudo systemctl enable --now s2s-routed
    journalctl -u s2s-routed -f
    ```
-   (Assumes you cloned this repo to `~/serverless-gpu` on the VM, or copied
-   the `serverless-gpu/` dir over like the other files.)
+   (Assumes you copied the repo's `oracle/` dir to the VM, or cloned the repo there.)
 3. Talk again — the log now shows `STT via RunPod GPU` / `TTS via RunPod GPU`,
    with `CPU fallback` on cold starts. To go back to pure CPU:
    `sudo systemctl stop s2s-routed && sudo systemctl start s2s`.

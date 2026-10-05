@@ -7,7 +7,9 @@ Start with `oracle/` (Part A — the always-on box), then come back here.
   create the endpoints → wire the Oracle box to `runpod-routed` → verify.
 - **`runpod/stt/`** — Parakeet TDT 0.6B serverless endpoint (Dockerfile + handler).
 - **`runpod/tts/`** — Qwen3-TTS 1.7B serverless endpoint (Dockerfile + handler).
-- **`oracle/`** — the router plugin that lives on the Oracle box
-  (`router_plugin.py`, `serve_routed.py`, `s2s-routed.service`).
+
+The router files (`router_plugin.py`, `serve_routed.py`, `s2s-routed.service`)
+live in the top-level `oracle/` dir — they execute on the box, so they live
+with the box setup.
 
 Cost: ~$0.25–0.35/GPU-hour, billed per second, $0 when idle.
