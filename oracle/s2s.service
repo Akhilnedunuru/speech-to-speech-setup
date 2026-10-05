@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 User=ubuntu
-EnvironmentFile=/home/ubuntu/.s2s_env
+EnvironmentFile=/etc/s2s/env
 ExecStart=/home/ubuntu/s2s/bin/speech-to-speech serve \
   --host 0.0.0.0 --port 8765 \
   --device cpu \

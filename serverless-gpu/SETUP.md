@@ -1,4 +1,8 @@
-# Hybrid setup: Oracle 24/7 CPU + RunPod serverless GPU (pay-per-use)
+# Part B — serverless GPU legs for the hybrid (pay-per-use)
+
+This is step 2 of the hybrid architecture (the repo's main path —
+see the top-level README). **Prerequisite: Part A works** — the Oracle box
+(`oracle/README.md`) is up with the pure-CPU pipeline and you can talk to it.
 
 ```
 Mac ──ws──▶ Oracle (free, 24/7): full CPU pipeline + smart routers
@@ -9,12 +13,13 @@ Mac ──ws──▶ Oracle (free, 24/7): full CPU pipeline + smart routers
                      → scale to zero after 5 min idle → $0 when you're not talking
 ```
 
-**What you get:** the Oracle box from Phase 1 stays the always-on front door
-(free forever). STT and TTS each try a RunPod GPU endpoint first (same models
+**What you get:** the Oracle box stays the always-on front door (free
+forever). STT and TTS each try a RunPod GPU endpoint first (same models
 as your Colab rig: Parakeet TDT 0.6B + Qwen3-TTS 1.7B). Cold start, timeout, or
 error → the turn is answered by local CPU (faster-whisper / Kokoro) with zero
 added latency, and the GPU worker finishes warming for the next turn. A circuit
-breaker stops trying a dead endpoint for 5 minutes.
+breaker stops trying a dead endpoint for 5 minutes. To go back to pure CPU:
+`sudo systemctl stop s2s-routed && sudo systemctl start s2s` — nothing else changes.
 
 **Cost:** ~$0.25–0.35/GPU-hour, billed per second, only while a worker is up.
 At ~1 hr/day of talking ≈ **$10–25/month**. $0 when idle.
@@ -104,43 +109,41 @@ afplay /tmp/tts_test.wav   # should sound like the Colab voice (Aiden)
 
 ## Part E — Oracle: install the router (15 min)
 
-SSH into the Oracle VM (Phase 1 box), then:
+SSH into the Oracle VM (Part A is already running there), then:
 
 ```bash
-mkdir -p ~/s2s-router && cd ~/s2s-router
-python3 -m venv venv && source venv/bin/activate
-pip install "speech-to-speech[faster-whisper,kokoro]" requests
+# one extra dep, into the existing venv
+~/s2s/bin/pip install -r ~/serverless-gpu/oracle/requirements-router.txt
 
-# copy these three files from the repo: router_plugin.py, serve_routed.py
-# (scp, or git clone your speech-to-speech-setup repo)
-```
+# router files (assumes you copied the serverless-gpu/ dir to the VM
+# alongside the oracle/ files, or cloned this repo there)
+mkdir -p ~/s2s-router
+cp ~/serverless-gpu/oracle/router_plugin.py ~/serverless-gpu/oracle/serve_routed.py ~/s2s-router/
 
-Create the secrets file (never in git):
-
-```bash
-sudo mkdir -p /etc/s2s && sudo chmod 700 /etc/s2s
-sudo tee /etc/s2s/env > /dev/null <<'EOF'
-HF_TOKEN=...
+# add the RunPod secrets to the same env file Part A created
+sudo tee -a /etc/s2s/env > /dev/null <<'EOF'
 RUNPOD_API_KEY=...
 RUNPOD_STT_ENDPOINT_ID=...
 RUNPOD_TTS_ENDPOINT_ID=...
 EOF
-sudo chmod 600 /etc/s2s/env
 ```
 
 Env knobs (optional, all have sane defaults):
 `GPU_ROUTE_TIMEOUT_S=8` (give up on GPU this turn after 8 s),
 `GPU_ROUTE_MAX_FAILURES=3`, `GPU_ROUTE_COOLDOWN_S=300`.
 
-Dry-run in the foreground first:
+Dry-run in the foreground first (stop the Part A service so the port is free):
 
 ```bash
-set -a; source /etc/s2s/env; set +a   # not needed if you export them yourself
-./venv/bin/python serve_routed.py \
+sudo systemctl stop s2s
+export $(sudo cat /etc/s2s/env | xargs)
+~/s2s/bin/python ~/s2s-router/serve_routed.py \
   --host 0.0.0.0 --port 8765 \
   --stt runpod-routed --tts runpod-routed \
   --faster_whisper_stt_model_name small.en \
+  --faster_whisper_stt_compute_type int8 \
   --kokoro_voice af_heart \
+  --kokoro_lang_code a \
   --llm_backend responses-api \
   --model_name "openai/gpt-oss-20b:groq" \
   --responses_api_base_url "https://router.huggingface.co/v1" \
@@ -154,24 +157,21 @@ in the log, then the normal server startup.
 ## Part F — systemd (2 min)
 
 ```bash
-sudo cp s2s-routed.service /etc/systemd/system/
-sudo sed -i "s|/home/ubuntu|/home/$USER|g" /etc/systemd/system/s2s-routed.service
+sudo cp ~/serverless-gpu/oracle/s2s-routed.service /etc/systemd/system/
 sudo systemctl daemon-reload
+sudo systemctl stop s2s                     # pure-CPU service from Part A
 sudo systemctl enable --now s2s-routed
-sudo systemctl status s2s-routed   # check it's active
+sudo systemctl status s2s-routed            # check it's active
 tail -f ~/s2s-router/server.log
 ```
 
 The tool server (`tool_server.py` on :8766 + `s2s-tools.service`) is unchanged
-from Phase 1 — keep it running as before.
+from Part A — keep it running as before.
 
-## Part G — Mac client (unchanged, new address)
+## Part G — Mac client (unchanged)
 
-Same as Phase 1, pointed at the Oracle public IP:
-
-```bash
-speech-to-speech talk --url ws://<ORACLE-PUBLIC-IP>:8765
-```
+Same command as Part A (`oracle/README.md` Step 6) — same URL, same
+`TOOL_API_URL`. Only the server's STT/TTS path changed.
 
 ## Verification checklist
 

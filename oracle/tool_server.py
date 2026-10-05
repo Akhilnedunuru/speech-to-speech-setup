@@ -70,5 +70,5 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-print("tool server starting on 127.0.0.1:8766", flush=True)
-ThreadingHTTPServer(("127.0.0.1", 8766), Handler).serve_forever()
+print("tool server starting on 0.0.0.0:8766", flush=True)
+ThreadingHTTPServer(("0.0.0.0", 8766), Handler).serve_forever()
