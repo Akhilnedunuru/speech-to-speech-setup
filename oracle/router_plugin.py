@@ -18,6 +18,11 @@ Per-turn behavior (race, first finisher wins):
      means "cold", not "broken", so cold starts can never trip the breaker.
   5. If the breaker is open (GPU known-dead), the GPU leg is skipped for
      GPU_ROUTE_COOLDOWN_S and turns go pure CPU with zero added latency.
+  6. Warm shortcut: once the GPU wins a race quickly, the next turns skip
+     the CPU leg entirely (GPU-only) so losing CPU inference stops burning
+     the box's cores in the background. A stumble falls back to CPU for
+     that turn and re-arms the full race; idleness past the endpoint's
+     scale-to-zero window resets to cold.
 
 The router subclasses the stock CPU handlers, so setup(), config flags and
 the queue/thread contract are inherited unchanged. Only process() is overridden.
@@ -40,7 +45,7 @@ import io
 import logging
 import os
 import time
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, wait
 from typing import Any, Callable, Iterator
 
 import numpy as np
@@ -60,6 +65,8 @@ TTS_ENDPOINT_ID = os.environ.get("RUNPOD_TTS_ENDPOINT_ID", "")
 TIMEOUT_S = float(os.environ.get("GPU_ROUTE_TIMEOUT_S", "8"))
 MAX_FAILURES = int(os.environ.get("GPU_ROUTE_MAX_FAILURES", "3"))
 COOLDOWN_S = float(os.environ.get("GPU_ROUTE_COOLDOWN_S", "300"))
+WARM_TIMEOUT_S = float(os.environ.get("GPU_WARM_TIMEOUT_S", "5"))
+WARM_IDLE_RESET_S = float(os.environ.get("GPU_WARM_IDLE_RESET_S", "240"))
 
 # Whisper-style language code -> Qwen3-TTS language name (mirrors upstream aliases)
 CODE_TO_QWEN3_LANG = {
@@ -102,6 +109,26 @@ class CircuitBreaker:
 
 _stt_breaker = CircuitBreaker("runpod-stt")
 _tts_breaker = CircuitBreaker("runpod-tts")
+
+# Warm shortcut: per-stage flag set when the GPU wins a race quickly, cleared
+# when the GPU loses, errors, or the endpoint has likely scaled to zero (idle
+# longer than the RunPod idle timeout). While warm, the CPU leg is skipped
+# entirely so losing CPU inference stops burning the box's 2 cores in the
+# background and starving the next turn's pipeline.
+_gpu_warm = {"stt": False, "tts": False}
+_last_race_ts = {"stt": 0.0, "tts": 0.0}
+
+
+def _is_warm(stage: str) -> bool:
+    if not _gpu_warm[stage]:
+        return False
+    idle = time.monotonic() - _last_race_ts[stage]
+    if idle > WARM_IDLE_RESET_S:
+        _gpu_warm[stage] = False
+        logger.info("%s: GPU marked cold after %.0fs idle (endpoint likely scaled to zero)",
+                    stage, idle)
+        return False
+    return True
 
 
 def _runsync(endpoint_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -158,24 +185,55 @@ def _guard_gpu(name: str, breaker: CircuitBreaker, gpu_fn: Callable[[], list]) -
     return result
 
 
-def _race(name: str, breaker: CircuitBreaker,
+def _race(stage: str, breaker: CircuitBreaker,
           gpu_fn: Callable[[], list], cpu_fn: Callable[[], list]) -> tuple[str, list]:
-    """Fire GPU and CPU at once; return (winner, result). First finisher wins.
+    """Run one turn of STT/TTS; return (winner, result).
 
-    The loser keeps running in the background: a losing GPU request warms the
-    worker for the next turn; a losing CPU inference is simply discarded.
-    If the first finisher raised, the other leg's result is used instead.
+    Warm shortcut: if the GPU won the previous race quickly and the endpoint
+    has not been idle long enough to scale to zero, the CPU leg is skipped
+    entirely -- GPU-only, no background CPU burn. If the warm GPU stumbles,
+    this turn falls back to CPU and the next turn races both legs again.
+
+    Cold path: fire GPU and CPU at once, first finisher wins. Cold GPU (slow)
+    -> CPU wins with zero added latency while the GPU request keeps warming
+    the worker in the background. If the first finisher raised, the other
+    leg's result is used instead.
     """
-    gpu_fut = _race_pool.submit(_guard_gpu, name, breaker, gpu_fn)
+    _last_race_ts[stage] = time.monotonic()
+
+    if _is_warm(stage) and breaker.allow():
+        started = time.perf_counter()
+        fut = _race_pool.submit(_guard_gpu, stage, breaker, gpu_fn)
+        try:
+            result = fut.result(timeout=WARM_TIMEOUT_S)
+        except FuturesTimeoutError:
+            _gpu_warm[stage] = False
+            logger.info("%s: warm GPU exceeded %.0fs, CPU fallback this turn",
+                        stage, WARM_TIMEOUT_S)
+            return "cpu", cpu_fn()
+        except Exception:
+            _gpu_warm[stage] = False
+            logger.info("%s: warm GPU failed, CPU fallback this turn", stage)
+            return "cpu", cpu_fn()
+        logger.info("%s won by gpu (warm shortcut) in %.2fs",
+                    stage, time.perf_counter() - started)
+        return "gpu", result
+
+    started = time.perf_counter()
+    gpu_fut = _race_pool.submit(_guard_gpu, stage, breaker, gpu_fn)
     cpu_fut = _race_pool.submit(cpu_fn)
     done, _ = wait([gpu_fut, cpu_fut], return_when=FIRST_COMPLETED)
     first = next(iter(done))
     try:
-        return ("gpu" if first is gpu_fut else "cpu"), first.result()
+        winner, result = ("gpu" if first is gpu_fut else "cpu"), first.result()
     except Exception:
         other = cpu_fut if first is gpu_fut else gpu_fut
         # Blocks only until the remaining leg finishes; raises only if both failed.
-        return ("cpu" if first is gpu_fut else "gpu"), other.result()
+        winner, result = ("cpu" if first is gpu_fut else "gpu"), other.result()
+    # Warm = GPU won *quickly*; a slow GPU win means the worker is still cold.
+    _gpu_warm[stage] = (winner == "gpu"
+                        and time.perf_counter() - started < WARM_TIMEOUT_S)
+    return winner, result
 
 
 class RoutedSTTHandler(FasterWhisperSTTHandler):
