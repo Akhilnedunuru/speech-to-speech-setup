@@ -232,7 +232,7 @@ class RoutedTTSHandler(KokoroTTSHandler):
             return
 
         started = time.perf_counter()
-        lang = CODE_TO_QWEN3_LANG.get((tts_input.tts_language_code or "en").lower(), "english")
+        lang = CODE_TO_QWEN3_LANG.get((tts_input.language_code or "en").lower(), "english")
 
         def _gpu() -> list:
             out = _runsync(TTS_ENDPOINT_ID, {"text": tts_input.text, "language": lang})
