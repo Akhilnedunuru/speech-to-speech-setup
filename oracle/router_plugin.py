@@ -237,11 +237,20 @@ class RoutedTTSHandler(KokoroTTSHandler):
         def _gpu() -> list:
             out = _runsync(TTS_ENDPOINT_ID, {"text": tts_input.text, "language": lang})
             pcm16 = _wav_b64_to_int16(out["audio"])
-            return [pcm16[i:i + TTS_CHUNK_SAMPLES]
-                    for i in range(0, len(pcm16), TTS_CHUNK_SAMPLES)]
+            logger.info("tts: GPU leg returned %.2fs of audio", len(pcm16) / 16000)
+            chunks = [pcm16[i:i + TTS_CHUNK_SAMPLES]
+                      for i in range(0, len(pcm16), TTS_CHUNK_SAMPLES)]
+            if not chunks:
+                # Winning with silence is worse than losing: force CPU fallback.
+                raise RuntimeError("GPU TTS returned empty audio")
+            return chunks
 
         def _cpu() -> list:
-            return list(parent_process(tts_input))
+            # Pin the voice: the parent maps "en"->"b" every turn and would
+            # flip af_heart to bm_fable mid-conversation. language_code=None
+            # disables its auto language/voice switch; the --kokoro_voice /
+            # --kokoro_lang_code flags then hold for the whole session.
+            return list(parent_process(tts_input.model_copy(update={"language_code": None})))
 
         winner, chunks = _race("tts", _tts_breaker, _gpu, _cpu)
         logger.info("TTS won by %s in %.2fs", winner, time.perf_counter() - started)
