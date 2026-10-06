@@ -45,6 +45,7 @@ import io
 import logging
 import os
 import re
+import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, wait
 from typing import Any, Callable, Iterator
@@ -82,8 +83,35 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
 
 def _split_sentences(text: str) -> list[str]:
-    """Split reply text into sentences for streaming TTS."""
-    return [p for p in (_SENTENCE_SPLIT_RE.split(text.strip())) if p and p.strip()]
+    """Split reply text into small clauses (~80 chars) for streaming TTS.
+
+    Finer chunks = faster first sound and better generation/playback overlap.
+    Per-request overhead is small vs inference (~27 chars/s), so this is
+    nearly free.
+    """
+    sentences = [p for p in _SENTENCE_SPLIT_RE.split(text.strip()) if p and p.strip()]
+    chunks: list[str] = []
+    for sent in sentences:
+        # Further split long sentences on clause boundaries (comma/semicolon/colon)
+        while len(sent) > 80:
+            m = None
+            for mm in re.finditer(r'[,;:]\s+', sent):
+                if mm.end() <= 80:
+                    m = mm
+                else:
+                    break
+            if m:
+                chunks.append(sent[:m.end()].strip())
+                sent = sent[m.end():].strip()
+            else:
+                # No clause boundary: hard split at 80 chars on a word boundary
+                sp = sent.rfind(' ', 0, 80)
+                cut = sp if sp > 40 else 80
+                chunks.append(sent[:cut].strip())
+                sent = sent[cut:].strip()
+        if sent:
+            chunks.append(sent)
+    return chunks
 
 # Shared pool for the race: at most one race per stage is ever in flight,
 # each race needs 2 threads (gpu + cpu).
@@ -193,6 +221,47 @@ def _guard_gpu(name: str, breaker: CircuitBreaker, gpu_fn: Callable[[], list]) -
     return result
 
 
+# Cross-endpoint warmup: the first STT race fires a background TTS warmup
+# and vice versa, so the other endpoint's cold start overlaps this turn
+# instead of stacking behind it. Only warms the *other* endpoint to avoid
+# queue-blocking real requests (max_workers=1).
+_warmup_lock = threading.Lock()
+_warmup_fired_for: set = set()
+
+
+def _silent_wav_b64() -> str:
+    """A 0.5s silent 16kHz mono WAV, base64-encoded, for STT warmup."""
+    import wave
+    import struct
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(struct.pack("<8000h", *([0] * 8000)))
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def _fire_cross_warmup(stage: str) -> None:
+    with _warmup_lock:
+        if stage in _warmup_fired_for:
+            return
+        _warmup_fired_for.add(stage)
+    other = "tts" if stage == "stt" else "stt"
+
+    def _do() -> None:
+        try:
+            if other == "tts":
+                _runsync(TTS_ENDPOINT, {"input": {"text": "warmup"}}, timeout=60)
+            else:
+                _runsync(STT_ENDPOINT, {"input": {"audio": _silent_wav_b64()}}, timeout=60)
+            logger.info("warmup: %s endpoint warmed", other)
+        except Exception as e:
+            logger.info("warmup: %s endpoint warmup failed: %s", other, e)
+
+    threading.Thread(target=_do, daemon=True, name=f"warmup-{other}").start()
+
+
 def _race(stage: str, breaker: CircuitBreaker,
           gpu_fn: Callable[[], list], cpu_fn: Callable[[], list]) -> tuple[str, list]:
     """Run one turn of STT/TTS; return (winner, result).
@@ -208,6 +277,7 @@ def _race(stage: str, breaker: CircuitBreaker,
     leg's result is used instead.
     """
     _last_race_ts[stage] = time.monotonic()
+    _fire_cross_warmup(stage)
 
     if _is_warm(stage) and breaker.allow():
         started = time.perf_counter()
