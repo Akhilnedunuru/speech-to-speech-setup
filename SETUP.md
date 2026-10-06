@@ -236,7 +236,12 @@ export $(sudo cat /etc/s2s/env | xargs)
   --model_name "openai/gpt-oss-20b:groq" \
   --responses_api_base_url "https://router.huggingface.co/v1" \
   --responses_api_api_key "$HF_TOKEN" \
-  --responses_api_stream
+  --responses_api_stream \
+  --responses_api_reasoning_effort low
+```
+
+> `--responses_api_reasoning_effort low` is required: the HF router rejects
+> the default `none` with a 400 error during the LLM warmup.
 ```
 
 You should see `Registered backends: --stt runpod-routed, --tts runpod-routed`

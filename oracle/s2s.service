@@ -17,6 +17,7 @@ ExecStart=/home/ubuntu/s2s/bin/speech-to-speech serve \
   --responses_api_base_url https://router.huggingface.co/v1 \
   --responses_api_api_key ${HF_TOKEN} \
   --responses_api_stream \
+  --responses_api_reasoning_effort low \
   --tts kokoro \
   --kokoro_voice af_heart \
   --kokoro_lang_code a
