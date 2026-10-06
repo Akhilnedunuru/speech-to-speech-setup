@@ -44,6 +44,7 @@ import base64
 import io
 import logging
 import os
+import re
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, wait
 from typing import Any, Callable, Iterator
@@ -76,6 +77,13 @@ CODE_TO_QWEN3_LANG = {
 }
 
 TTS_CHUNK_SAMPLES = 1600  # 100 ms @ 16 kHz
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split reply text into sentences for streaming TTS."""
+    return [p for p in (_SENTENCE_SPLIT_RE.split(text.strip())) if p and p.strip()]
 
 # Shared pool for the race: at most one race per stage is ever in flight,
 # each race needs 2 threads (gpu + cpu).
@@ -287,6 +295,44 @@ class RoutedTTSHandler(KokoroTTSHandler):
 
         if not _tts_breaker.allow():
             yield from parent_process(tts_input)
+            return
+
+        # Warm shortcut: stream sentence-by-sentence from the GPU only.
+        # First sound lands after the first sentence (~1s) instead of after
+        # the full reply (~3s). No CPU leg, no background burn.
+        if _is_warm("tts"):
+            _last_race_ts["tts"] = time.monotonic()
+            lang = CODE_TO_QWEN3_LANG.get((tts_input.language_code or "en").lower(), "english")
+            sentences = _split_sentences(tts_input.text)
+            completed = 0
+            gpu_ok = True
+            try:
+                for sentence in sentences:
+                    out = _runsync(TTS_ENDPOINT_ID, {"text": sentence, "language": lang})
+                    pcm16 = _wav_b64_to_int16(out["audio"])
+                    if len(pcm16) == 0:
+                        raise RuntimeError("GPU TTS returned empty audio for a sentence")
+                    logger.info("tts: GPU streamed sentence %d/%d (%d chars) -> %.2fs audio",
+                                completed + 1, len(sentences), len(sentence), len(pcm16) / 16000)
+                    for i in range(0, len(pcm16), TTS_CHUNK_SAMPLES):
+                        yield pcm16[i:i + TTS_CHUNK_SAMPLES]
+                    completed += 1
+            except requests.Timeout:
+                logger.info("tts: streaming GPU leg timed out (cold worker?)")
+                gpu_ok = False
+            except Exception:
+                _tts_breaker.failure()
+                logger.warning("tts: streaming GPU leg errored", exc_info=True)
+                gpu_ok = False
+            else:
+                _tts_breaker.success()
+            _gpu_warm["tts"] = gpu_ok
+            if not gpu_ok:
+                # Resume only the unspoken remainder on CPU -- never duplicate
+                # audio already streamed.
+                remaining = " ".join(sentences[completed:])
+                resume = tts_input.model_copy(update={"language_code": None, "text": remaining})
+                yield from parent_process(resume)
             return
 
         started = time.perf_counter()
