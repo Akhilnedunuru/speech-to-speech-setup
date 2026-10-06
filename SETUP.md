@@ -106,7 +106,7 @@ source ~/Desktop/s2s-client/bin/activate
 export OPENAI_API_KEY=not-needed
 export TOOL_API_URL=http://<PUBLIC-IP>:8766
 PYTHONPATH=$HOME/Desktop speech-to-speech talk \
-  --url ws://<PUBLIC-IP>:8765 \
+  --url ws://<PUBLIC-IP>:8765/v1/realtime \
   --playback-buffer-ms 800 \
   --block-mic-during-playback \
   --tool-module slow_tools \
@@ -243,7 +243,24 @@ export $(sudo cat /etc/s2s/env | xargs)
 
 > `--responses_api_reasoning_effort low` is required: the HF router rejects
 > the default `none` with a 400 error during the LLM warmup.
+> `--no_enable_live_transcription` disables mid-speech progressive STT passes
+> (each burned 1–2 s of CPU and stalled the final transcription).
 ```
+
+What the router does per turn:
+- **Cold:** GPU and CPU race; first finisher wins. GPU timeout (8 s) falls
+  back to CPU with no added latency; the GPU request keeps warming the
+  worker in the background. First STT race also fires a background warmup
+  for the TTS endpoint and vice versa.
+- **Warm:** after a fast GPU win, later turns skip the CPU leg entirely
+  (`warm shortcut`). Idle > 240 s marks the endpoint cold again (RunPod
+  scales to zero at 300 s).
+- **TTS streaming:** warm replies are split into ~80-char clauses, each
+  sent to the GPU separately; audio plays as clauses arrive (first sound
+  ~1–2 s). If the GPU fails mid-stream, only the unspoken remainder falls
+  back to CPU.
+- **Safety:** empty GPU audio raises so CPU backs it up; 3 real GPU errors
+  trip the breaker (5 min cooldown). Timeouts never trip it.
 
 You should see `Registered backends: --stt runpod-routed, --tts runpod-routed`
 in the log, then the normal server startup.
@@ -266,13 +283,27 @@ from Part A — keep it running as before.
 
 1. **GPU path works:** talk one sentence → server.log shows
    `STT won by gpu` / `TTS won by gpu` with timings.
-2. **Cold start is invisible:** wait 10+ min idle (worker scaled to zero),
-   talk → first turn logs `won by cpu` (GPU still booting, race lost with
-   no added latency), second turn goes `won by gpu`. You hear no error.
-3. **Breaker works:** stop both endpoints (or break the API key) → after
+2. **Cold start is graceful, not invisible:** wait 10+ min idle (workers
+   scaled to zero), talk → first 3–5 turns log `won by cpu` (GPU still
+   booting; the race falls back with no added latency) and `GPU leg timed
+   out after 8s (cold worker?)`. STT usually warms by turn 3–4, TTS by
+   turn 5–6 (its cold start is 40–60 s: GPU allocation + large image pull).
+   You hear no error, just slower turns.
+3. **Warm shortcut:** once a GPU leg wins quickly, later turns log
+   `won by gpu (warm shortcut)` — the CPU leg is skipped entirely, so the
+   2-core box isn't burning cycles on discarded work.
+4. **Streaming TTS:** on warm turns the log shows
+   `tts: GPU streamed sentence 1/2 (... chars) -> ...s audio` — replies are
+   split into ~80-char clauses, first sound lands ~1–2 s after the LLM
+   finishes instead of waiting for the whole reply.
+5. **Breaker works:** stop both endpoints (or break the API key) → after
    3 failed turns, no more GPU attempts for 5 min; everything still answers.
-4. **Bill check:** RunPod console → Billing — after a day of tinkering you
+   Timeouts don't trip the breaker (cold workers aren't errors).
+6. **Bill check:** RunPod console → Billing — after a day of tinkering you
    should see minutes of GPU time, not hours.
+
+Expected warm-turn budget: ~1 s VAD→STT handoff + 0.7 s STT + 0.5 s LLM +
+~2 s first TTS clause + 0.8 s Mac playback buffer ≈ 4–5 s total.
 
 ---
 
@@ -298,7 +329,7 @@ source ~/Desktop/s2s-client/bin/activate
 export OPENAI_API_KEY=not-needed
 export TOOL_API_URL=http://<PUBLIC-IP>:8766
 PYTHONPATH=$HOME/Desktop speech-to-speech talk \
-  --url ws://<PUBLIC-IP>:8765 \
+  --url ws://<PUBLIC-IP>:8765/v1/realtime \
   --playback-buffer-ms 800 \
   --block-mic-during-playback \
   --tool-module slow_tools \
@@ -311,6 +342,8 @@ Notes:
   (console scripts don't add the cwd to the import path).
 - `--block-mic-during-playback` prevents the mic hearing the reply (kills barge-in;
   headphones are the better fix if you want barge-in).
+- The URL must be the full Realtime endpoint ending in `/v1/realtime` —
+  a bare `ws://<IP>:8765` fails with `ValueError: --url must end in /realtime`.
 - Note `ws://` (not `wss://`) — no TLS on the raw IP, fine for personal dev.
   For `wss://`, point a free DuckDNS subdomain at the IP and put Caddy in front.
 
@@ -384,6 +417,25 @@ from the router) — the pipeline is built to be debugged stage by stage.
   isolate endpoint vs router
 - `curl` to runsync hangs forever on first call → normal cold start
   (up to ~2 min with model download). Don't Ctrl-C; let it complete once
+- RunPod console test shows Failed in ~275 ms → the console's default
+  payload uses `"prompt"`; our TTS handler expects `"text"`. Change the key
+  and re-run. (Pipeline traffic via `runsync` is unaffected.)
+- TTS delay time 40–60 s in the console → normal cold start (GPU allocation
+  + image pull). STT is faster (smaller image). While testing, bump the
+  endpoint's Idle Timeout to 900–1800 s so workers stay warm between rounds;
+  set it back to 300 s when done.
+- `GPU leg timed out after 8s (cold worker?)` on every turn for 5+ turns →
+  check the endpoint's Requests tab: long *delay* time = waiting on GPU
+  capacity; long *execution* time = slow worker. Also verify the GPU types
+  (RTX 4000 Ada / A4000 / A4500 / 2000 Ada are all fine — more types = better
+  availability).
+- Turn shows `audio=0.00s` right after a tool call → metric misattribution,
+  not silence: the spoken reply's audio gets counted on the tool-call
+  response line. You heard it.
+- No `faster_whisper - Processing audio` lines during speech → expected:
+  `--no_enable_live_transcription` disables the 0.5 s progressive passes
+  (they were stalling the STT thread ~2 s/turn). Final transcriptions still
+  appear.
 
 ## 8. Cost guardrails (set once, sleep well)
 
