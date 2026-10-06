@@ -196,7 +196,7 @@ class RoutedSTTHandler(FasterWhisperSTTHandler):
                 language_code=None,
                 turn_id=vad_audio.turn_id,
                 turn_revision=vad_audio.turn_revision,
-                speech_stopped_at_s=vad_audio.speech_end_at_s,
+                speech_stopped_at_s=vad_audio.created_at_s,
             )]
 
         def _cpu() -> list:
@@ -232,7 +232,7 @@ class RoutedTTSHandler(KokoroTTSHandler):
             return
 
         started = time.perf_counter()
-        lang = CODE_TO_QWEN3_LANG.get((tts_input.language_code or "en").lower(), "english")
+        lang = CODE_TO_QWEN3_LANG.get((tts_input.tts_language_code or "en").lower(), "english")
 
         def _gpu() -> list:
             out = _runsync(TTS_ENDPOINT_ID, {"text": tts_input.text, "language": lang})
