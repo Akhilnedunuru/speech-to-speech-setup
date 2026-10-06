@@ -43,7 +43,7 @@ roughly $10–25/month at ~1 hr/day of talking, $0 when idle.
 
 ## Part A — the always-on box (Oracle Always Free, ~45 min)
 
-The 24/7 front door: a free Ampere VM (4 ARM cores, 24 GB RAM) running the
+The 24/7 front door: a free Ampere VM (2 ARM cores, 12 GB RAM) running the
 full pipeline on CPU. Get this talking first; Part B only upgrades STT/TTS.
 
 ### A1. Oracle account
@@ -58,7 +58,7 @@ full pipeline on CPU. Get this talking first; Part B only upgrades STT/TTS.
 
 Compute → Instances → Create:
 - Image: **Ubuntu 24.04**, shape **VM.Standard.A1.Flex** (Ampere ARM)
-- OCPUs: **4**, Memory: **24 GB**, Boot volume: 100 GB (all within Always Free)
+- OCPUs: **2**, Memory: **12 GB**, Boot volume: 100 GB (all within Always Free)
 - Add your SSH public key (`~/.ssh/id_ed25519.pub` on your Mac)
 - Note the **public IP** after it boots
 
@@ -72,11 +72,10 @@ Compute → Instances → Create:
 
 ```bash
 ssh -i ~/.ssh/id_ed25519 ubuntu@<PUBLIC-IP>
-# copy these files over (from your Mac):
-#   setup_oracle.sh  tool_server.py  s2s.service  s2s-tools.service
-scp -i ~/.ssh/id_ed25519 setup_oracle.sh tool_server.py s2s.service s2s-tools.service ubuntu@<PUBLIC-IP>:~/
-# on the VM:
-chmod +x ~/setup_oracle.sh && ~/setup_oracle.sh
+# on the VM — clone the repo (always gets the latest code) and run setup:
+git clone https://github.com/Akhilnedunuru/speech-to-speech-setup
+cd speech-to-speech-setup/oracle
+chmod +x setup_oracle.sh && ./setup_oracle.sh
 ```
 
 ### A5. Secrets + services
@@ -203,11 +202,11 @@ SSH into the VM (Part A is running there), then:
 
 ```bash
 # one extra dep, into the existing venv
-~/s2s/bin/pip install -r ~/oracle/requirements-router.txt
+~/s2s/bin/pip install -r ~/speech-to-speech-setup/oracle/requirements-router.txt
 
 # router files (in the repo's oracle/ dir — copy that dir to the VM, or clone the repo there)
 mkdir -p ~/s2s-router
-cp ~/oracle/router_plugin.py ~/oracle/serve_routed.py ~/s2s-router/
+cp ~/speech-to-speech-setup/oracle/router_plugin.py ~/speech-to-speech-setup/oracle/serve_routed.py ~/s2s-router/
 
 # append the RunPod secrets to the same env file Part A created
 sudo tee -a /etc/s2s/env > /dev/null <<'EOF'
@@ -246,7 +245,7 @@ in the log, then the normal server startup.
 ### B6. Switch systemd to routed (2 min)
 
 ```bash
-sudo cp ~/oracle/s2s-routed.service /etc/systemd/system/
+sudo cp ~/speech-to-speech-setup/oracle/s2s-routed.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl stop s2s                     # pure-CPU service from Part A
 sudo systemctl enable --now s2s-routed
