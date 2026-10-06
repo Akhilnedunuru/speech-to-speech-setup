@@ -30,7 +30,8 @@ ExecStart=/home/ubuntu/s2s/bin/python /home/ubuntu/s2s-router/serve_routed.py \
   --responses_api_base_url "https://router.huggingface.co/v1" \
   --responses_api_api_key "${HF_TOKEN}" \
   --responses_api_stream \
-  --responses_api_reasoning_effort low
+  --responses_api_reasoning_effort low \
+  --no_enable_live_transcription
 Restart=always
 RestartSec=5
 StandardOutput=append:/home/ubuntu/s2s-router/server.log

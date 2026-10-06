@@ -18,6 +18,7 @@ ExecStart=/home/ubuntu/s2s/bin/speech-to-speech serve \
   --responses_api_api_key ${HF_TOKEN} \
   --responses_api_stream \
   --responses_api_reasoning_effort low \
+  --no_enable_live_transcription \
   --tts kokoro \
   --kokoro_voice af_heart \
   --kokoro_lang_code a

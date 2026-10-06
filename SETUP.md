@@ -237,7 +237,8 @@ export $(sudo cat /etc/s2s/env | xargs)
   --responses_api_base_url "https://router.huggingface.co/v1" \
   --responses_api_api_key "$HF_TOKEN" \
   --responses_api_stream \
-  --responses_api_reasoning_effort low
+  --responses_api_reasoning_effort low \
+  --no_enable_live_transcription
 ```
 
 > `--responses_api_reasoning_effort low` is required: the HF router rejects
