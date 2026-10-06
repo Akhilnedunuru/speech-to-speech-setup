@@ -18,6 +18,9 @@ echo "=== tool API dir ==="
 mkdir -p ~/s2s-tools
 cp "$(dirname "$0")/tool_server.py" ~/s2s-tools/tool_server.py
 
+echo "=== secrets dir ==="
+sudo mkdir -p /etc/s2s
+
 echo "=== open firewall ports (persisted) ==="
 sudo iptables -I INPUT -p tcp --dport 8765 -j ACCEPT
 sudo iptables -I INPUT -p tcp --dport 8766 -j ACCEPT
