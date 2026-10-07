@@ -395,6 +395,54 @@ def _supertonic_synthesize(text: str) -> list:
             for i in range(0, len(pcm16), TTS_CHUNK_SAMPLES)]
 
 
+# --- Phase 2: voice cloning ---
+# When TTS_VOICE_PROFILE points to a profile dir (reference.wav + ref_text.txt)
+# and RUNPOD_TTS_CLONE_ENDPOINT_ID is set, the GPU TTS leg uses the Qwen3-TTS
+# Base clone endpoint (ICL mode) instead of the CustomVoice preset endpoint.
+# One endpoint serves unlimited voices; the profile is loaded once and cached.
+# The CPU fallback (Supertonic 3) is unchanged.
+_clone_profile_lock = threading.Lock()
+_clone_profile = None  # (ref_audio_b64, ref_text) or None
+
+
+def _get_clone_profile():
+    """Load voice profile once: (base64 reference wav, transcript)."""
+    global _clone_profile
+    with _clone_profile_lock:
+        if _clone_profile is None:
+            profile_dir = os.environ.get("TTS_VOICE_PROFILE", "")
+            if profile_dir:
+                ref_wav = os.path.join(profile_dir, "reference.wav")
+                ref_txt = os.path.join(profile_dir, "ref_text.txt")
+                with open(ref_wav, "rb") as f:
+                    audio_b64 = base64.b64encode(f.read()).decode("ascii")
+                with open(ref_txt) as f:
+                    text = f.read().strip()
+                _clone_profile = (audio_b64, text)
+                logger.info("Voice clone profile loaded: %s (%d chars transcript)",
+                            profile_dir, len(text))
+    return _clone_profile
+
+
+def _tts_gpu_target(text: str, lang: str) -> tuple:
+    """Return (endpoint_id, payload) for the GPU TTS leg.
+
+    Clone endpoint (ICL) when a voice profile is set, else the CustomVoice
+    preset endpoint. Same response format from both.
+    """
+    profile = _get_clone_profile()
+    clone_id = os.environ.get("RUNPOD_TTS_CLONE_ENDPOINT_ID", "")
+    if profile and clone_id:
+        ref_audio_b64, ref_text = profile
+        return clone_id, {
+            "text": text,
+            "ref_audio": ref_audio_b64,
+            "ref_text": ref_text,
+            "language": lang,
+        }
+    return TTS_ENDPOINT_ID, {"text": text, "language": lang}
+
+
 class RoutedTTSHandler(KokoroTTSHandler):
     """Qwen3-TTS-on-RunPod raced with local Supertonic 3; first finisher wins."""
 
@@ -430,7 +478,8 @@ class RoutedTTSHandler(KokoroTTSHandler):
             gpu_ok = True
             try:
                 for sentence in sentences:
-                    out = _runsync(TTS_ENDPOINT_ID, {"text": sentence, "language": lang})
+                    endpoint_id, payload = _tts_gpu_target(sentence, lang)
+                    out = _runsync(endpoint_id, payload)
                     pcm16 = _wav_b64_to_int16(out["audio"])
                     if len(pcm16) == 0:
                         raise RuntimeError("GPU TTS returned empty audio for a sentence")
@@ -461,7 +510,8 @@ class RoutedTTSHandler(KokoroTTSHandler):
         lang = CODE_TO_QWEN3_LANG.get((tts_input.language_code or "en").lower(), "english")
 
         def _gpu() -> list:
-            out = _runsync(TTS_ENDPOINT_ID, {"text": tts_input.text, "language": lang})
+            endpoint_id, payload = _tts_gpu_target(tts_input.text, lang)
+            out = _runsync(endpoint_id, payload)
             pcm16 = _wav_b64_to_int16(out["audio"])
             logger.info("tts: GPU leg returned %.2fs of audio", len(pcm16) / 16000)
             chunks = [pcm16[i:i + TTS_CHUNK_SAMPLES]
