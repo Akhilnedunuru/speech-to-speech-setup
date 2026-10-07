@@ -343,8 +343,60 @@ class RoutedSTTHandler(FasterWhisperSTTHandler):
         yield from items
 
 
+# --- Supertonic 3 CPU TTS (replaces Kokoro as the CPU fallback leg) ---
+# 99M params, ONNX Runtime + INT8, ~2-3x realtime on 2-core ARM (vs Kokoro ~1x).
+# Built-in voices M1-M5/F1-F5; custom cloned voices via SUPERTONIC_STYLE_PATH
+# (Voice Builder JSON export). First run downloads ~400MB to ~/.cache/supertonic3/.
+_supertonic_lock = threading.Lock()
+_supertonic_tts = None
+_supertonic_style = None
+
+
+def _get_supertonic():
+    """Lazy-load Supertonic 3 engine + voice style (thread-safe, once)."""
+    global _supertonic_tts, _supertonic_style
+    with _supertonic_lock:
+        if _supertonic_tts is None:
+            from supertonic import TTS
+            _supertonic_tts = TTS(auto_download=True)
+            style_path = os.environ.get("SUPERTONIC_STYLE_PATH")
+            if style_path:
+                _supertonic_style = _supertonic_tts.get_voice_style_from_path(style_path)
+                logger.info("Supertonic 3 ready (custom style: %s)", style_path)
+            else:
+                voice = os.environ.get("SUPERTONIC_VOICE", "F1")
+                _supertonic_style = _supertonic_tts.get_voice_style(voice_name=voice)
+                logger.info("Supertonic 3 ready (built-in voice: %s)", voice)
+    return _supertonic_tts, _supertonic_style
+
+
+def _supertonic_synthesize(text: str) -> list:
+    """Synthesize text with Supertonic 3 on CPU.
+
+    Returns list of int16 numpy chunks at 16kHz (TTS_CHUNK_SAMPLES each),
+    matching the pipeline's expected audio format.
+    """
+    from scipy.signal import resample_poly
+    from math import gcd
+    tts, style = _get_supertonic()
+    steps = int(os.environ.get("SUPERTONIC_STEPS", "6"))
+    wav, _duration = tts.synthesize(
+        text=text,
+        voice_style=style,
+        total_steps=steps,
+        lang="en",
+    )
+    # wav: float32 (1, N) at 44100 Hz -> 16kHz int16 chunks
+    audio = wav.squeeze().astype(np.float32)
+    g = gcd(44100, 16000)
+    audio = resample_poly(audio, 16000 // g, 44100 // g).astype(np.float32)
+    pcm16 = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
+    return [pcm16[i:i + TTS_CHUNK_SAMPLES]
+            for i in range(0, len(pcm16), TTS_CHUNK_SAMPLES)]
+
+
 class RoutedTTSHandler(KokoroTTSHandler):
-    """Qwen3-TTS-on-RunPod raced with local Kokoro; first finisher wins."""
+    """Qwen3-TTS-on-RunPod raced with local Supertonic 3; first finisher wins."""
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         parent_process = super().process
@@ -401,8 +453,8 @@ class RoutedTTSHandler(KokoroTTSHandler):
                 # Resume only the unspoken remainder on CPU -- never duplicate
                 # audio already streamed.
                 remaining = " ".join(sentences[completed:])
-                resume = tts_input.model_copy(update={"language_code": None, "text": remaining})
-                yield from parent_process(resume)
+                for chunk in _supertonic_synthesize(remaining):
+                    yield chunk
             return
 
         started = time.perf_counter()
@@ -420,11 +472,10 @@ class RoutedTTSHandler(KokoroTTSHandler):
             return chunks
 
         def _cpu() -> list:
-            # Pin the voice: the parent maps "en"->"b" every turn and would
-            # flip af_heart to bm_fable mid-conversation. language_code=None
-            # disables its auto language/voice switch; the --kokoro_voice /
-            # --kokoro_lang_code flags then hold for the whole session.
-            return list(parent_process(tts_input.model_copy(update={"language_code": None})))
+            # Supertonic 3 on CPU (~2-3x realtime) replaces Kokoro (~1x).
+            # Voice via SUPERTONIC_VOICE (default F1) or SUPERTONIC_STYLE_PATH
+            # (Voice Builder JSON for cloned voices, incl. Phase 2 profiles).
+            return _supertonic_synthesize(tts_input.text)
 
         winner, chunks = _race("tts", _tts_breaker, _gpu, _cpu)
         logger.info("TTS won by %s in %.2fs", winner, time.perf_counter() - started)
