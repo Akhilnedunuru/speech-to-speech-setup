@@ -252,9 +252,9 @@ def _fire_cross_warmup(stage: str) -> None:
     def _do() -> None:
         try:
             if other == "tts":
-                _runsync(TTS_ENDPOINT_ID, {"text": "warmup"}, timeout=60)
+                _runsync(TTS_ENDPOINT_ID, {"text": "warmup"})
             else:
-                _runsync(STT_ENDPOINT_ID, {"audio": _silent_wav_b64()}, timeout=60)
+                _runsync(STT_ENDPOINT_ID, {"audio": _silent_wav_b64()})
             logger.info("warmup: %s endpoint warmed", other)
         except Exception as e:
             logger.info("warmup: %s endpoint warmup failed: %s", other, e)
