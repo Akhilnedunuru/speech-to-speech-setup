@@ -400,17 +400,65 @@ def _supertonic_synthesize(text: str) -> list:
 # and RUNPOD_TTS_CLONE_ENDPOINT_ID is set, the GPU TTS leg uses the Qwen3-TTS
 # Base clone endpoint (ICL mode) instead of the CustomVoice preset endpoint.
 # One endpoint serves unlimited voices; the profile is loaded once and cached.
+# The web UI can switch the agent's voice at runtime by writing a profile ID
+# to ~/voice-profiles/.active_voice -- we re-check that file's mtime on each
+# call and reload the profile when the selection changes.
 # The CPU fallback (Supertonic 3) is unchanged.
 _clone_profile_lock = threading.Lock()
 _clone_profile = None  # (ref_audio_b64, ref_text) or None
+_clone_profile_key = None  # (active_voice_mtime or None, profile_dir) cache key
+_ACTIVE_VOICE_FILE = os.path.join(os.path.expanduser("~/voice-profiles"), ".active_voice")
+
+
+def _resolve_profile_dir():
+    """Pick the profile dir: UI-selected voice or TTS_VOICE_PROFILE default.
+
+    Returns (profile_dir, active_mtime_or_None, active_profile_id_or_None).
+    Falls back to the env default (with a warning) when .active_voice is
+    missing, empty, invalid, or points at a profile without reference files.
+    """
+    default_dir = os.environ.get("TTS_VOICE_PROFILE", "")
+    try:
+        with open(_ACTIVE_VOICE_FILE) as f:
+            profile_id = f.read().strip()
+    except FileNotFoundError:
+        return default_dir, None, None
+    except OSError as e:
+        logger.warning("Could not read %s: %s; using default voice", _ACTIVE_VOICE_FILE, e)
+        return default_dir, None, None
+    if not profile_id:
+        return default_dir, None, None
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", profile_id):
+        logger.warning("Invalid agent voice id in %s; using default voice", _ACTIVE_VOICE_FILE)
+        return default_dir, None, None
+    candidate = os.path.join(os.path.dirname(_ACTIVE_VOICE_FILE), profile_id)
+    if not (os.path.isfile(os.path.join(candidate, "reference.wav"))
+            and os.path.isfile(os.path.join(candidate, "ref_text.txt"))):
+        logger.warning("Agent voice profile '%s' missing reference files; using default voice",
+                       profile_id)
+        return default_dir, None, None
+    return candidate, os.path.getmtime(_ACTIVE_VOICE_FILE), profile_id
 
 
 def _get_clone_profile():
-    """Load voice profile once: (base64 reference wav, transcript)."""
-    global _clone_profile
+    """Load voice profile: (base64 reference wav, transcript).
+
+    Cached, but the UI-selected voice (~/voice-profiles/.active_voice) is
+    re-checked by mtime on each call so voice switches apply promptly.
+    """
+    global _clone_profile, _clone_profile_key
     with _clone_profile_lock:
-        if _clone_profile is None:
-            profile_dir = os.environ.get("TTS_VOICE_PROFILE", "")
+        profile_dir, active_mtime, active_id = _resolve_profile_dir()
+        cache_key = (active_mtime, profile_dir)
+        if _clone_profile is None or _clone_profile_key != cache_key:
+            first_load = _clone_profile_key is None
+            _clone_profile_key = cache_key
+            _clone_profile = None
+            if not first_load:
+                if active_id:
+                    logger.info("Agent voice switched to: %s", active_id)
+                else:
+                    logger.info("Agent voice reverted to default profile")
             if profile_dir:
                 ref_wav = os.path.join(profile_dir, "reference.wav")
                 ref_txt = os.path.join(profile_dir, "ref_text.txt")

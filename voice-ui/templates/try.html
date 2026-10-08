@@ -86,6 +86,25 @@
     display: none; align-items: center; justify-content: center;
   }
   .voice-card.selected .check-badge { display: flex; }
+  /* agent-voice indicator + button */
+  .voice-card .agent-badge {
+    display: none;
+    font-size: 10px; font-weight: 800; letter-spacing: .6px;
+    color: #06121a; background: var(--accent-grad);
+    padding: 4px 9px; border-radius: 999px; margin-bottom: 8px;
+    box-shadow: 0 0 12px rgba(34,211,238,.4);
+  }
+  .voice-card.is-agent { border-color: var(--ok); }
+  .voice-card.is-agent .agent-badge { display: inline-block; }
+  .agent-btn {
+    margin-top: 12px; width: 100%; padding: 9px; font-size: 12.5px; font-weight: 700;
+    border-radius: 9px; border: 1px solid var(--border); background: rgba(255,255,255,.04);
+    color: var(--muted); cursor: pointer; font-family: inherit;
+    transition: all .15s ease;
+  }
+  .agent-btn:hover:not(:disabled) { color: var(--text); border-color: var(--accent); background: rgba(34,211,238,.08); }
+  .agent-btn:disabled { opacity: .5; cursor: default; }
+  .voice-card.is-agent .agent-btn { display: none; }
   /* shimmer skeletons */
   .voice-card.skeleton { cursor: default; pointer-events: none; }
   .voice-card.skeleton:hover { transform: none; }
@@ -311,6 +330,7 @@ ringFg.style.strokeDasharray = RING_C;
 ringFg.style.strokeDashoffset = RING_C;
 
 let selectedId = null;
+let agentVoiceId = null;
 let warmTimer = null;
 
 function setStatus(msg, cls) {
@@ -370,16 +390,24 @@ async function loadVoices() {
       const initial = (p.name || '?').trim().charAt(0).toUpperCase() || '?';
       card.innerHTML =
         '<div class="check-badge">✓</div>' +
+        '<div class="agent-badge">🎙️ AGENT VOICE</div>' +
         '<div class="avatar">' + escapeHtml(initial) + '</div>' +
         '<div class="name">' + escapeHtml(p.name) + '</div>' +
-        '<div class="date">' + escapeHtml(fmtDate(p.created_at) || 'Voice') + '</div>';
+        '<div class="date">' + escapeHtml(fmtDate(p.created_at) || 'Voice') + '</div>' +
+        '<button class="agent-btn" type="button">Use for agent</button>';
       card.addEventListener('click', () => selectVoice(p.id));
       card.addEventListener('keydown', e => {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectVoice(p.id); }
       });
+      const agentBtn = card.querySelector('.agent-btn');
+      agentBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        setAgentVoice(p.id, agentBtn);
+      });
       voicesEl.appendChild(card);
     });
     selectedId = profiles[0].id;
+    loadAgentVoice();
   } catch (e) {
     voicesEl.innerHTML = '';
     setStatus('Could not load voices: ' + escapeHtml(e.message), 'error');
@@ -389,6 +417,43 @@ function selectVoice(id) {
   selectedId = id;
   voicesEl.querySelectorAll('.voice-card').forEach(c =>
     c.classList.toggle('selected', c.dataset.id === id));
+}
+
+/* ---------- agent voice ---------- */
+function markAgentVoice() {
+  voicesEl.querySelectorAll('.voice-card').forEach(c =>
+    c.classList.toggle('is-agent', c.dataset.id === agentVoiceId));
+}
+
+async function loadAgentVoice() {
+  try {
+    const r = await fetch('/api/agent-voice');
+    const d = await r.json();
+    agentVoiceId = d.profile_id || null;
+    markAgentVoice();
+  } catch (e) { /* non-fatal: badge just won't show */ }
+}
+
+async function setAgentVoice(id, btn) {
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/agent-voice', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile_id: id }),
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      throw new Error(d.error || ('HTTP ' + r.status));
+    }
+    agentVoiceId = id;
+    markAgentVoice();
+    setStatus('Agent will now speak in this voice.', 'ok');
+  } catch (e) {
+    setStatus('Failed: ' + escapeHtml(e.message), 'error');
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 /* ---------- custom player ---------- */

@@ -45,6 +45,7 @@ RUNPOD_API_KEY = os.environ.get("RUNPOD_API_KEY", "")
 STT_ENDPOINT_ID = os.environ.get("RUNPOD_STT_ENDPOINT_ID", "acuml4hbia4g1f")
 CLONE_ENDPOINT_ID = os.environ.get("RUNPOD_TTS_CLONE_ENDPOINT_ID", "naq5rfqu0i3g7m")
 PROFILES_DIR = os.path.expanduser("~/voice-profiles")
+ACTIVE_VOICE_FILE = os.path.join(PROFILES_DIR, ".active_voice")
 
 # Synthesis guardrails
 MAX_SYNTH_CHARS = 500          # per-request text cap
@@ -241,6 +242,52 @@ def create_profile():
         "name": name,
         "transcript": transcript,
     })
+
+
+@app.get("/api/agent-voice")
+@rate_limited
+def get_agent_voice():
+    """Which voice profile the live agent speaks in (null = env default)."""
+    try:
+        with open(ACTIVE_VOICE_FILE) as f:
+            profile_id = f.read().strip()
+    except (OSError, FileNotFoundError):
+        return jsonify({"profile_id": None})
+    if not profile_id:
+        return jsonify({"profile_id": None})
+    # Stale IDs (deleted voice) report null so the UI shows no badge.
+    try:
+        pdir = _profile_path(profile_id)
+    except ValueError:
+        return jsonify({"profile_id": None})
+    if not os.path.isfile(os.path.join(pdir, "reference.wav")):
+        return jsonify({"profile_id": None})
+    return jsonify({"profile_id": profile_id})
+
+
+@app.post("/api/agent-voice")
+@rate_limited
+def set_agent_voice():
+    """Set the voice the live agent speaks in.
+
+    Writes the profile ID to ~/voice-profiles/.active_voice; the pipeline
+    router picks it up on the next TTS turn (no restart needed).
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    profile_id = (data.get("profile_id") or "").strip()
+    if not profile_id:
+        return jsonify({"error": "profile_id is required."}), 400
+    try:
+        pdir = _profile_path(profile_id)
+    except ValueError:
+        return jsonify({"error": "Unknown voice."}), 404
+    if not os.path.isfile(os.path.join(pdir, "reference.wav")):
+        return jsonify({"error": "Unknown voice."}), 404
+    os.makedirs(PROFILES_DIR, exist_ok=True)
+    with open(ACTIVE_VOICE_FILE, "w") as f:
+        f.write(profile_id + "\n")
+    logger.info("Agent voice set to %s", profile_id)
+    return jsonify({"ok": True, "profile_id": profile_id})
 
 
 @app.post("/api/synthesize")
