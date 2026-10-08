@@ -279,7 +279,7 @@ def synthesize():
             "text": text,
             "ref_audio": ref_audio_b64,
             "ref_text": ref_text,
-            "language": "en",
+            "language": "english",
         })
         audio_b64 = out.get("audio")
         if not audio_b64:
