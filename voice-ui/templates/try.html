@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Try Your Voice</title>
+<style>
+  :root { --bg:#0f1115; --card:#1a1d24; --accent:#4f8cff; --accent-dim:#2c5bb8;
+          --text:#e8eaf0; --muted:#9aa0b0; --danger:#e05656; --ok:#43b581; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         background:var(--bg); color:var(--text); min-height:100vh;
+         display:flex; justify-content:center; padding:32px 16px; }
+  .wrap { width:100%; max-width:640px; }
+  header { text-align:center; margin-bottom:28px; }
+  header h1 { margin:0 0 8px; font-size:28px; }
+  header p { color:var(--muted); margin:0; }
+  nav { text-align:center; margin-bottom:24px; }
+  nav a { color:var(--accent); text-decoration:none; margin:0 12px; font-weight:600; }
+  nav a:hover { text-decoration:underline; }
+  .card { background:var(--card); border-radius:14px; padding:24px; margin-bottom:20px;
+          box-shadow:0 4px 24px rgba(0,0,0,.35); }
+  .card h2 { margin:0 0 12px; font-size:18px; }
+  label.field { display:block; margin:0 0 6px; font-weight:600; font-size:14px; }
+  select, textarea { width:100%; padding:12px; border-radius:8px; border:1px solid #2a2e39;
+                     background:#11141a; color:var(--text); font-size:16px; }
+  textarea { min-height:110px; resize:vertical; font-family:inherit; line-height:1.5; margin-top:14px; }
+  .char-count { text-align:right; color:var(--muted); font-size:12px; margin-top:4px; }
+  .btn { display:inline-block; border:none; border-radius:8px; padding:13px 26px;
+         font-size:16px; font-weight:700; cursor:pointer; color:#fff; margin-top:14px;
+         background:var(--accent); transition:background .15s; }
+  .btn:hover:not(:disabled) { background:var(--accent-dim); }
+  .btn:disabled { opacity:.45; cursor:default; }
+  .status { margin-top:14px; font-size:15px; min-height:22px; }
+  .status.error { color:var(--danger); }
+  .status.ok { color:var(--ok); }
+  .spinner { display:inline-block; width:16px; height:16px; border:2px solid #555;
+             border-top-color:var(--accent); border-radius:50%;
+             animation:spin .7s linear infinite; vertical-align:-3px; margin-right:8px; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .warm-note { background:#1c2333; border:1px solid #2c4a7c; border-radius:8px;
+               padding:12px 14px; font-size:14px; color:#bcd0f5; margin-top:12px; display:none; }
+  .warm-note.show { display:block; }
+  audio { width:100%; margin-top:14px; }
+  .empty { text-align:center; color:var(--muted); padding:20px 0; }
+  .empty a { color:var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🔊 Try Your Voice</h1>
+    <p>Type anything — hear it spoken in your cloned voice.</p>
+  </header>
+  <nav><a href="/">Clone</a> · <a href="/try">Try it</a></nav>
+
+  <div class="card" id="mainCard">
+    <label class="field" for="voiceSelect">Voice</label>
+    <select id="voiceSelect"><option value="">Loading voices…</option></select>
+
+    <label class="field" for="textInput" style="margin-top:14px;">Text to speak</label>
+    <textarea id="textInput" maxlength="500" placeholder="Type something for your AI voice to say…"></textarea>
+    <div class="char-count"><span id="charCount">0</span>/500</div>
+
+    <button class="btn" id="genBtn">Generate audio</button>
+    <div class="status" id="status"></div>
+    <div class="warm-note" id="warmNote">
+      <span class="spinner"></span><strong>Warming up your voice…</strong><br>
+      <span style="color:var(--muted)">The GPU was asleep — first synthesis takes about a minute. Hang tight, it only happens once.</span>
+    </div>
+    <audio id="player" controls style="display:none"></audio>
+  </div>
+
+  <div class="card hidden" id="emptyCard" style="display:none">
+    <div class="empty">
+      No voices yet.<br><br><a href="/">🎙️ Clone your voice first →</a>
+    </div>
+  </div>
+</div>
+
+<script>
+const voiceSelect = document.getElementById('voiceSelect');
+const textInput = document.getElementById('textInput');
+const charCount = document.getElementById('charCount');
+const genBtn = document.getElementById('genBtn');
+const statusEl = document.getElementById('status');
+const warmNote = document.getElementById('warmNote');
+const player = document.getElementById('player');
+const mainCard = document.getElementById('mainCard');
+const emptyCard = document.getElementById('emptyCard');
+
+const WARM_AFTER_S = 5;   // show the warmup note if generation takes longer than this
+let warmTimer = null;
+
+function setStatus(msg, cls) {
+  statusEl.className = 'status' + (cls ? ' ' + cls : '');
+  statusEl.innerHTML = msg || '';
+}
+
+textInput.addEventListener('input', () => { charCount.textContent = textInput.value.length; });
+
+async function loadVoices() {
+  try {
+    const r = await fetch('/api/profiles');
+    const d = await r.json();
+    const profiles = d.profiles || [];
+    if (!profiles.length) {
+      mainCard.style.display = 'none';
+      emptyCard.style.display = 'block';
+      return;
+    }
+    voiceSelect.innerHTML = profiles.map(p =>
+      '<option value="' + p.id + '">' + escapeHtml(p.name) + '</option>'
+    ).join('');
+  } catch (e) {
+    voiceSelect.innerHTML = '<option value="">Could not load voices</option>';
+    setStatus('Could not load voices: ' + e.message, 'error');
+  }
+}
+
+genBtn.addEventListener('click', async () => {
+  const profile_id = voiceSelect.value;
+  const text = textInput.value.trim();
+  if (!profile_id) { setStatus('Pick a voice first.', 'error'); return; }
+  if (!text) { setStatus('Type something for your voice to say.', 'error'); return; }
+
+  genBtn.disabled = true;
+  player.style.display = 'none';
+  player.src = '';
+  setStatus('<span class="spinner"></span>Generating…');
+  warmNote.classList.remove('show');
+  warmTimer = setTimeout(() => warmNote.classList.add('show'), WARM_AFTER_S * 1000);
+
+  try {
+    const r = await fetch('/api/synthesize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile_id, text }),
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      throw new Error(d.error || ('HTTP ' + r.status));
+    }
+    const blob = await r.blob();
+    player.src = URL.createObjectURL(blob);
+    player.style.display = 'block';
+    player.play().catch(() => {});
+    setStatus('✅ Done — playing your voice.', 'ok');
+  } catch (e) {
+    setStatus('Failed: ' + escapeHtml(e.message), 'error');
+  } finally {
+    clearTimeout(warmTimer);
+    warmNote.classList.remove('show');
+    genBtn.disabled = false;
+  }
+});
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+loadVoices();
+</script>
+</body>
+</html>

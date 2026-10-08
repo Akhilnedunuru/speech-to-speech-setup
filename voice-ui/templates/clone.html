@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clone a Voice</title>
+<style>
+  :root { --bg:#0f1115; --card:#1a1d24; --accent:#4f8cff; --accent-dim:#2c5bb8;
+          --text:#e8eaf0; --muted:#9aa0b0; --danger:#e05656; --ok:#43b581; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         background:var(--bg); color:var(--text); min-height:100vh;
+         display:flex; justify-content:center; padding:32px 16px; }
+  .wrap { width:100%; max-width:640px; }
+  header { text-align:center; margin-bottom:28px; }
+  header h1 { margin:0 0 8px; font-size:28px; }
+  header p { color:var(--muted); margin:0; }
+  nav { text-align:center; margin-bottom:24px; }
+  nav a { color:var(--accent); text-decoration:none; margin:0 12px; font-weight:600; }
+  nav a:hover { text-decoration:underline; }
+  .card { background:var(--card); border-radius:14px; padding:24px; margin-bottom:20px;
+          box-shadow:0 4px 24px rgba(0,0,0,.35); }
+  .card h2 { margin:0 0 12px; font-size:18px; }
+  .paragraph { background:#11141a; border:1px solid #2a2e39; border-radius:10px;
+               padding:18px; font-size:18px; line-height:1.7; margin-bottom:18px; }
+  .rec-row { display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  .mic-btn { width:72px; height:72px; border-radius:50%; border:none; cursor:pointer;
+             background:var(--accent); color:#fff; font-size:30px; flex-shrink:0;
+             transition:transform .15s, background .15s; }
+  .mic-btn:hover:not(:disabled) { transform:scale(1.06); }
+  .mic-btn:disabled { opacity:.45; cursor:default; }
+  .mic-btn.recording { background:var(--danger); animation:pulse 1.2s infinite; }
+  @keyframes pulse { 0%,100%{box-shadow:0 0 0 0 rgba(224,86,86,.5)} 50%{box-shadow:0 0 0 14px rgba(224,86,86,0)} }
+  .timer { font-size:22px; font-variant-numeric:tabular-nums; min-width:64px; }
+  .hint { color:var(--muted); font-size:14px; }
+  label.field { display:block; margin:14px 0 6px; font-weight:600; font-size:14px; }
+  input[type=text] { width:100%; padding:12px; border-radius:8px; border:1px solid #2a2e39;
+                     background:#11141a; color:var(--text); font-size:16px; }
+  .consent { display:flex; gap:10px; align-items:flex-start; margin:16px 0;
+             background:#11141a; border:1px solid #2a2e39; border-radius:8px; padding:14px; }
+  .consent input { margin-top:3px; width:18px; height:18px; flex-shrink:0; }
+  .consent span { font-size:14px; line-height:1.5; }
+  .btn { display:inline-block; border:none; border-radius:8px; padding:13px 26px;
+         font-size:16px; font-weight:700; cursor:pointer; color:#fff;
+         background:var(--accent); transition:background .15s; }
+  .btn:hover:not(:disabled) { background:var(--accent-dim); }
+  .btn:disabled { opacity:.45; cursor:default; }
+  .btn.secondary { background:#2a2e39; }
+  .btn.secondary:hover:not(:disabled) { background:#343945; }
+  .status { margin-top:14px; font-size:15px; min-height:22px; }
+  .status.error { color:var(--danger); }
+  .status.ok { color:var(--ok); }
+  .transcript-box { background:#11141a; border:1px solid #2a2e39; border-radius:8px;
+                    padding:14px; font-size:15px; line-height:1.6; margin:12px 0; display:none; }
+  .transcript-box.show { display:block; }
+  .spinner { display:inline-block; width:16px; height:16px; border:2px solid #555;
+             border-top-color:var(--accent); border-radius:50%;
+             animation:spin .7s linear infinite; vertical-align:-3px; margin-right:8px; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  audio { width:100%; margin-top:10px; }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🎙️ Clone a Voice</h1>
+    <p>Read the paragraph below — we'll turn it into your AI voice.</p>
+  </header>
+  <nav><a href="/">Clone</a> · <a href="/try">Try it</a></nav>
+
+  <div class="card">
+    <h2>Step 1 — Read this aloud</h2>
+    <div class="paragraph" id="paragraph">
+      The quick brown fox jumps over the lazy riverbank at dawn.
+      Bright stars fade as morning light fills the sky.
+      Technology connects people across vast distances every single day.
+      Please read this passage slowly and naturally, as if you are speaking to a close friend.
+    </div>
+    <div class="rec-row">
+      <button class="mic-btn" id="micBtn" title="Start recording">🎤</button>
+      <div>
+        <div class="timer" id="timer">0:00</div>
+        <div class="hint" id="recHint">Tap the mic, then read the paragraph above.</div>
+      </div>
+    </div>
+    <audio id="playback" controls class="hidden"></audio>
+  </div>
+
+  <div class="card">
+    <h2>Step 2 — Name it &amp; save</h2>
+    <label class="field" for="voiceName">Voice name</label>
+    <input type="text" id="voiceName" placeholder="e.g. My voice" maxlength="40" autocomplete="off">
+    <div class="consent">
+      <input type="checkbox" id="consent">
+      <span>This is my own voice, or I have the speaker's permission to clone it. I will not use it to impersonate someone without their consent.</span>
+    </div>
+    <button class="btn" id="saveBtn" disabled>Create my voice</button>
+    <button class="btn secondary hidden" id="retryBtn">↺ Re-record</button>
+    <div class="status" id="status"></div>
+    <div class="transcript-box" id="transcriptBox">
+      <strong>We heard:</strong>
+      <div id="transcriptText" style="margin-top:6px;"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const micBtn = document.getElementById('micBtn');
+const timerEl = document.getElementById('timer');
+const recHint = document.getElementById('recHint');
+const playback = document.getElementById('playback');
+const saveBtn = document.getElementById('saveBtn');
+const retryBtn = document.getElementById('retryBtn');
+const statusEl = document.getElementById('status');
+const transcriptBox = document.getElementById('transcriptBox');
+const transcriptText = document.getElementById('transcriptText');
+const voiceNameInput = document.getElementById('voiceName');
+const consentBox = document.getElementById('consent');
+
+const MAX_REC_S = 20;
+let mediaRecorder = null, chunks = [], recStart = 0, tickInt = null, autoStopTO = null;
+let wavBlob = null, stream = null;
+
+function setStatus(msg, cls) {
+  statusEl.className = 'status' + (cls ? ' ' + cls : '');
+  statusEl.innerHTML = msg;
+}
+function fmtTime(s) { return Math.floor(s/60) + ':' + String(Math.floor(s%60)).padStart(2,'0'); }
+
+async function startRecording() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    setStatus('Microphone access denied. Please allow microphone access and try again.', 'error');
+    return;
+  }
+  chunks = [];
+  // Prefer webm/opus; we convert to 16kHz mono WAV below.
+  const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : '';
+  mediaRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+  mediaRecorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  mediaRecorder.onstop = onStopped;
+  mediaRecorder.start();
+  recStart = Date.now();
+  micBtn.classList.add('recording');
+  micBtn.textContent = '⏹';
+  micBtn.title = 'Stop recording';
+  recHint.textContent = 'Recording… read the paragraph above.';
+  tickInt = setInterval(() => {
+    const s = (Date.now() - recStart) / 1000;
+    timerEl.textContent = fmtTime(s);
+    if (s >= MAX_REC_S) stopRecording();
+  }, 200);
+  autoStopTO = setTimeout(stopRecording, MAX_REC_S * 1000 + 500);
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+}
+
+async function onStopped() {
+  clearInterval(tickInt); clearTimeout(autoStopTO);
+  stream.getTracks().forEach(t => t.stop());
+  micBtn.classList.remove('recording');
+  micBtn.textContent = '🎤';
+  micBtn.disabled = true;
+  recHint.textContent = 'Processing…';
+  try {
+    const raw = new Blob(chunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+    wavBlob = await toWav16kMono(raw);
+    playback.src = URL.createObjectURL(wavBlob);
+    playback.classList.remove('hidden');
+    const dur = await wavDuration(wavBlob);
+    if (dur < 5) {
+      setStatus('Recording is too short (' + dur.toFixed(1) + 's). Please read the full paragraph.', 'error');
+      resetRecorder();
+      return;
+    }
+    setStatus('Got ' + dur.toFixed(1) + 's of audio. Name your voice below, check consent, then create.', 'ok');
+    saveBtn.disabled = false;
+    retryBtn.classList.remove('hidden');
+  } catch (e) {
+    setStatus('Could not process the recording: ' + e.message, 'error');
+    resetRecorder();
+  }
+}
+
+function resetRecorder() {
+  micBtn.disabled = false; micBtn.textContent = '🎤';
+  timerEl.textContent = '0:00';
+  recHint.textContent = 'Tap the mic, then read the paragraph above.';
+  playback.classList.add('hidden'); playback.src = '';
+  saveBtn.disabled = true; retryBtn.classList.add('hidden');
+  wavBlob = null;
+}
+
+// Decode any browser-recorded audio, resample to 16kHz mono, encode as PCM WAV.
+async function toWav16kMono(blob) {
+  const ab = await blob.arrayBuffer();
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AC();
+  const decoded = await ctx.decodeAudioData(ab);
+  await ctx.close();
+  const sr = 16000;
+  const len = Math.max(1, Math.floor(decoded.duration * sr));
+  const off = new OfflineAudioContext(1, len, sr);
+  const src = off.createBufferSource();
+  src.buffer = decoded;
+  src.connect(off.destination);
+  src.start(0);
+  const rendered = await off.startRendering();
+  return encodeWav(rendered);
+}
+
+function wavDuration(blob) {
+  return new Promise(res => {
+    const url = URL.createObjectURL(blob);
+    const a = new Audio();
+    a.onloadedmetadata = () => { URL.revokeObjectURL(url); res(a.duration || 0); };
+    a.onerror = () => res(0);
+    a.src = url;
+  });
+}
+
+function encodeWav(audioBuffer) {
+  const ch = audioBuffer.getChannelData(0);
+  const n = ch.length;
+  const buf = new ArrayBuffer(44 + n * 2);
+  const v = new DataView(buf);
+  const wstr = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  wstr(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); wstr(8, 'WAVE');
+  wstr(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true); v.setUint32(24, 16000, true);
+  v.setUint32(28, 16000 * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  wstr(36, 'data'); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    const s = Math.max(-1, Math.min(1, ch[i]));
+    v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+micBtn.addEventListener('click', () => {
+  if (mediaRecorder && mediaRecorder.state === 'recording') stopRecording();
+  else startRecording();
+});
+retryBtn.addEventListener('click', () => { resetRecorder(); setStatus(''); });
+
+saveBtn.addEventListener('click', async () => {
+  const name = voiceNameInput.value.trim();
+  if (!name) { setStatus('Please give your voice a name.', 'error'); return; }
+  if (!consentBox.checked) { setStatus('Please confirm the consent checkbox.', 'error'); return; }
+  if (!wavBlob) { setStatus('Please record your voice first.', 'error'); return; }
+  saveBtn.disabled = true;
+  setStatus('<span class="spinner"></span>Uploading and transcribing your voice…');
+  transcriptBox.classList.remove('show');
+  try {
+    const fd = new FormData();
+    fd.append('audio', wavBlob, 'reference.wav');
+    fd.append('name', name);
+    fd.append('consent', 'true');
+    const r = await fetch('/api/profile', { method: 'POST', body: fd });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    transcriptText.textContent = '“' + d.transcript + '”';
+    transcriptBox.classList.add('show');
+    setStatus('✅ Voice <strong>' + escapeHtml(d.name) + '</strong> created! <a href="/try" style="color:var(--accent)">Try it now →</a>', 'ok');
+  } catch (e) {
+    setStatus('Failed: ' + e.message, 'error');
+    saveBtn.disabled = false;
+  }
+});
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+</script>
+</body>
+</html>
