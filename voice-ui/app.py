@@ -83,25 +83,65 @@ def _profile_path(profile_id: str) -> str:
 
 
 def _runsync(endpoint_id: str, payload: dict) -> dict:
-    """POST to a RunPod serverless endpoint via /runsync (blocks until done)."""
-    url = f"https://api.runpod.ai/v2/{endpoint_id}/runsync"
+    """POST to a RunPod serverless endpoint via /runsync.
+
+    When the endpoint is cold or busy, RunPod returns
+    {"status": "IN_QUEUE", "id": "<job-id>"} instead of blocking until the
+    job completes. In that case we poll the job status endpoint every
+    2 seconds until the job completes or fails, bounded by RUNPOD_TIMEOUT_S.
+    """
+    headers = {
+        "Authorization": f"Bearer {RUNPOD_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    deadline = time.time() + RUNPOD_TIMEOUT_S
+
+    def _check_output(data: dict) -> dict:
+        output = data.get("output")
+        if not isinstance(output, dict):
+            raise RuntimeError(f"Unexpected RunPod output: {output!r}"[:200])
+        return output
+
     resp = requests.post(
-        url,
-        headers={
-            "Authorization": f"Bearer {RUNPOD_API_KEY}",
-            "Content-Type": "application/json",
-        },
+        f"https://api.runpod.ai/v2/{endpoint_id}/runsync",
+        headers=headers,
         json={"input": payload},
         timeout=RUNPOD_TIMEOUT_S,
     )
     resp.raise_for_status()
     data = resp.json()
-    if data.get("status") not in ("COMPLETED",):
-        raise RuntimeError(f"RunPod job did not complete: {data.get('status')}")
-    output = data.get("output")
-    if not isinstance(output, dict):
-        raise RuntimeError(f"Unexpected RunPod output: {output!r}"[:200])
-    return output
+
+    status = data.get("status")
+    if status == "COMPLETED":
+        return _check_output(data)
+    if status == "FAILED":
+        raise RuntimeError(f"RunPod job failed: {data.get('error', 'unknown error')}"[:200])
+    if status not in ("IN_QUEUE", "IN_PROGRESS"):
+        raise RuntimeError(f"RunPod job did not complete: {status}")
+
+    job_id = data.get("id")
+    if not job_id:
+        raise RuntimeError(f"RunPod job queued but no job id returned: {data!r}"[:200])
+
+    status_url = f"https://api.runpod.ai/v2/{endpoint_id}/status/{job_id}"
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            raise RuntimeError(
+                f"RunPod job {job_id} timed out after {RUNPOD_TIMEOUT_S}s"
+            )
+        time.sleep(min(2, remaining))
+        poll_resp = requests.get(
+            status_url, headers=headers, timeout=max(1, min(30, remaining))
+        )
+        poll_resp.raise_for_status()
+        data = poll_resp.json()
+        status = data.get("status")
+        if status == "COMPLETED":
+            return _check_output(data)
+        if status == "FAILED":
+            raise RuntimeError(f"RunPod job failed: {data.get('error', 'unknown error')}"[:200])
+        # IN_QUEUE / IN_PROGRESS / anything else: keep polling until deadline.
 
 
 # ---- Pages ----
