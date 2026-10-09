@@ -25,11 +25,8 @@ GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
 SYSTEM_PROMPT = (
     "You are a concise voice assistant. Keep every reply short and "
-    "conversational, suitable for speech. You have these tools: "
-    "get_weather(city: string). "
-    'If you need a tool, reply with ONLY a JSON object like '
-    '{"tool": "get_weather", "args": {"city": "Dallas"}}. '
-    "Otherwise reply with plain text only, no JSON."
+    "conversational, suitable for speech. Use the get_weather tool when "
+    "the user asks about weather."
 )
 
 # Matches a JSON object possibly wrapped in ```json fences.
@@ -93,15 +90,46 @@ def _extract_tool_call(text: str):
 def groq_llm_fn(messages: list) -> dict:
     """AgenticBrain llm_fn backed by Groq chat completions."""
     client = _get_client()
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the weather for a city",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string", "description": "City name"}
+                    },
+                    "required": ["city"],
+                },
+            },
+        }
+    ]
     resp = client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[{"role": "system", "content": SYSTEM_PROMPT}]
         + to_chat_messages(messages),
         temperature=0.7,
         max_tokens=300,
+        tools=tools,
+        tool_choice="auto",
     )
-    text = (resp.choices[0].message.content or "").strip()
-
+    msg = resp.choices[0].message
+    
+    # Native tool call
+    if msg.tool_calls:
+        tc = msg.tool_calls[0]
+        name = tc.function.name
+        try:
+            args = json.loads(tc.function.arguments or "{}")
+        except (json.JSONDecodeError, ValueError):
+            args = {}
+        logger.info("Brain requested tool: %s(%s)", name, args)
+        return {"type": "tool", "name": name, "args": args}
+    
+    # Fallback to JSON-in-text convention
+    text = (msg.content or "").strip()
     tool_call = _extract_tool_call(text)
     if tool_call:
         name, args = tool_call
