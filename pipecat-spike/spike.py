@@ -195,7 +195,7 @@ class RunPodQwenTTS(TTSService):
     def can_generate_metrics(self) -> bool:
         return True
 
-    async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
+    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
         global RUNPOD_API_KEY
         old_key, RUNPOD_API_KEY = RUNPOD_API_KEY, self._api_key
         try:

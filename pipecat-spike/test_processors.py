@@ -140,7 +140,7 @@ def test_tts_payload_and_frames():
             ref_audio_b64=ref_b64,
             ref_text="reference transcript",
         )
-        frames = asyncio.run(_collect(tts.run_tts("Hello there")))
+        frames = asyncio.run(_collect(tts.run_tts("Hello there", "test-ctx")))
     finally:
         _restore_requests(orig_post, orig_get)
 
@@ -190,7 +190,7 @@ def test_tts_in_queue_polls():
             api_key="KEY", endpoint_id="tts-ep",
             ref_audio_b64=ref_b64, ref_text="ref",
         )
-        frames = asyncio.run(_collect(tts.run_tts("hi")))
+        frames = asyncio.run(_collect(tts.run_tts("hi", "test-ctx")))
     finally:
         spike_mod.requests.post = orig_post
         spike_mod.requests.get = orig_get

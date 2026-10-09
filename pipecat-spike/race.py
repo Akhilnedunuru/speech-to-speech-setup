@@ -362,12 +362,12 @@ class RacingTTS(TTSService):
     def can_generate_metrics(self) -> bool:
         return True
 
-    async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
+    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
         await self.start_ttfb_metrics()
         yield TTSStartedFrame()
         try:
             winner, pcm = await _race_turn(
-                self._state, lambda: self._gpu_synthesize(text), lambda: self._cpu_synthesize(text)
+                self._state, lambda: self._gpu_synthesize(text, context_id), lambda: self._cpu_synthesize(text)
             )
             logger.info("TTS won by %s: %d chars -> %d PCM bytes", winner, len(text), len(pcm))
             # ~20ms chunks (640 bytes @ 16kHz mono 16-bit).
@@ -384,10 +384,10 @@ class RacingTTS(TTSService):
             await self.stop_ttfb_metrics()
             yield TTSStoppedFrame()
 
-    async def _gpu_synthesize(self, text: str) -> bytes:
+    async def _gpu_synthesize(self, text: str, context_id: str) -> bytes:
         """Synthesize via the RunPod GPU leg; returns raw PCM16 bytes."""
         chunks: list[bytes] = []
-        async for frame in self._gpu.run_tts(text):
+        async for frame in self._gpu.run_tts(text, context_id):
             if isinstance(frame, TTSAudioRawFrame):
                 chunks.append(frame.audio)
             elif isinstance(frame, ErrorFrame):

@@ -234,7 +234,7 @@ def test_tts_gpu_wins_chunks_frames():
 
         tts._gpu_synthesize = gpu
         tts._cpu_synthesize = slow_cpu
-        frames = run(collect(tts.run_tts("hello")))
+        frames = run(collect(tts.run_tts("hello", "test-ctx")))
         assert isinstance(frames[0], TTSStartedFrame), frames
         assert isinstance(frames[-1], TTSStoppedFrame), frames
         audio = [f for f in frames if isinstance(f, TTSAudioRawFrame)]
