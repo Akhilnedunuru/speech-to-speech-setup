@@ -364,7 +364,7 @@ class RacingTTS(TTSService):
 
     async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
         await self.start_ttfb_metrics()
-        yield TTSStartedFrame()
+        # TTSStartedFrame is pushed by base class _push_tts_frames
         try:
             winner, pcm = await _race_turn(
                 self._state, lambda: self._gpu_synthesize(text, context_id), lambda: self._cpu_synthesize(text)

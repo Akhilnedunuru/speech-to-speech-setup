@@ -200,7 +200,7 @@ class RunPodQwenTTS(TTSService):
         old_key, RUNPOD_API_KEY = RUNPOD_API_KEY, self._api_key
         try:
             await self.start_ttfb_metrics()
-            yield TTSStartedFrame()
+            # TTSStartedFrame is pushed by base class _push_tts_frames
 
             # Dynamic voice: re-resolve per turn so UI voice switches apply
             # without restart. Falls back to constructor values.
