@@ -366,9 +366,18 @@ class RacingTTS(TTSService):
         await self.start_ttfb_metrics()
         # TTSStartedFrame is pushed by base class _push_tts_frames
         try:
-            winner, pcm = await _race_turn(
+            # Keepalive: Pipecat's audio context times out after 3s with no
+            # frames, but our race can take 1-10s. Refresh while racing.
+            race_task = asyncio.create_task(_race_turn(
                 self._state, lambda: self._gpu_synthesize(text, context_id), lambda: self._cpu_synthesize(text)
-            )
+            ))
+            while not race_task.done():
+                try:
+                    self._refresh_audio_context(context_id)
+                except Exception:
+                    pass
+                await asyncio.sleep(2.0)
+            winner, pcm = race_task.result()
             logger.info("TTS won by %s: %d chars -> %d PCM bytes", winner, len(text), len(pcm))
             # ~20ms chunks (640 bytes @ 16kHz mono 16-bit).
             for i in range(0, len(pcm), 640):
