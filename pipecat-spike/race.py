@@ -5,7 +5,7 @@ frame processors:
 
 - RacingSTT(SegmentedSTTService): RunPod Parakeet (GPU) vs faster-whisper
   small.en int8 (CPU). First finisher wins.
-- RacingTTS(TTSService): RunPod Qwen3-TTS clone (GPU) vs Supertonic 3 (CPU).
+- RacingTTS(FrameProcessor): RunPod Qwen3-TTS clone (GPU) vs Supertonic 3 (CPU).
   First finisher wins.
 
 Race rules (mirroring production):
@@ -45,7 +45,6 @@ import asyncio
 import io
 import logging
 import os
-import re
 import threading
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -53,13 +52,15 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from pipecat.frames.frames import (
     ErrorFrame,
     Frame,
+    OutputAudioRawFrame,
+    TextFrame,
     TranscriptionFrame,
     TTSAudioRawFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
 )
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.stt_service import SegmentedSTTService
-from pipecat.services.tts_service import TTSService
 
 from spike import RunPodParakeetSTT, RunPodQwenTTS
 
@@ -265,44 +266,6 @@ def _wav_to_f32_mono(wav_bytes: bytes, target_sr: int = 16000):
     return data
 
 
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
-
-
-def _split_sentences(text: str) -> list[str]:
-    """Split reply text into sentences for streaming TTS.
-
-    Mirrors production's oracle/router_plugin._split_sentences: split on
-    sentence boundaries, then further split long sentences (>80 chars) on
-    clause boundaries so the first audio lands fast.
-    """
-    text = (text or "").strip()
-    if not text:
-        return []
-    sentences = [p.strip() for p in _SENTENCE_SPLIT_RE.split(text) if p and p.strip()]
-    chunks: list[str] = []
-    for sent in sentences:
-        while len(sent) > 80:
-            # Prefer splitting on clause boundaries within the first 80 chars.
-            m = None
-            for mm in re.finditer(r"[,;:]\s+", sent):
-                if mm.end() <= 80:
-                    m = mm
-                else:
-                    break
-            if m:
-                chunks.append(sent[: m.end()].strip())
-                sent = sent[m.end():].strip()
-            else:
-                # No clause boundary: hard split at a word boundary <= 80 chars.
-                sp = sent.rfind(" ", 0, 80)
-                cut = sp if sp > 40 else 80
-                chunks.append(sent[:cut].strip())
-                sent = sent[cut:].strip()
-        if sent:
-            chunks.append(sent)
-    return chunks
-
-
 class RacingSTT(SegmentedSTTService):
     """STT that races RunPod Parakeet (GPU) vs faster-whisper (CPU).
 
@@ -359,23 +322,24 @@ class RacingSTT(SegmentedSTTService):
         return "".join(s.text for s in segments).strip()
 
 
-class RacingTTS(TTSService):
+class RacingTTS(FrameProcessor):
     """TTS that races RunPod Qwen3-TTS clone (GPU) vs Supertonic 3 (CPU).
 
     Reuses RunPodQwenTTS from spike.py for the GPU leg; the CPU leg is
     Supertonic 3 ONNX on CPU, lazily loaded (same as production).
+
+    NOTE: extends FrameProcessor directly (NOT TTSService) to bypass Pipecat's
+    audio-context machinery. TTSService._handle_audio_context times out after
+    3s with no frames, but our GPU/CPU race takes 1-10s -- the context would
+    be deleted before the race finishes and every frame dropped with
+    "unable to append audio to context". As a plain FrameProcessor we push
+    OutputAudioRawFrame chunks straight to the transport.
 
     Voice selection (Phase 3, step 3): pass voice_resolver=VoiceResolver()
     and the GPU leg clones whichever voice the UI selected
     (~/voice-profiles/.active_voice), switching mid-session with no restart.
     The CPU leg keeps its fixed voice (SUPERTONIC_VOICE / SUPERTONIC_STYLE_PATH)
     -- Supertonic needs a pre-built style, it can't do per-request ICL.
-
-    Streaming: text is split into sentences; the first sentence is raced to
-    pick the turn's winner, then the winner synthesizes the remaining
-    sentences directly (no re-race). Audio chunks flow as each sentence is
-    ready -- first sound lands in ~1-2s, satisfying Pipecat's 3s
-    audio-context timeout with no keepalive hack.
     """
 
     def __init__(
@@ -389,7 +353,7 @@ class RacingTTS(TTSService):
         voice_resolver=None,
         **kwargs,
     ):
-        super().__init__(sample_rate=sample_rate, stop_frame_timeout_s=30.0, **kwargs)
+        super().__init__(**kwargs)
         self._gpu = RunPodQwenTTS(
             api_key=api_key or os.environ.get("RUNPOD_API_KEY", ""),
             endpoint_id=endpoint_id or TTS_ENDPOINT_ID,
@@ -404,81 +368,51 @@ class RacingTTS(TTSService):
         self._supertonic_style = None
         self._st_lock = threading.Lock()
 
-    def can_generate_metrics(self) -> bool:
-        return True
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
 
-    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
-        await self.start_ttfb_metrics()
-        # NOTE: TTSStartedFrame is pushed by base class _push_tts_frames;
-        # do NOT yield it here.
+        if not isinstance(frame, TextFrame):
+            await self.push_frame(frame, direction)
+            return
+
+        text = frame.text or ""
+        if not text.strip():
+            return
+
         try:
-            sentences = _split_sentences(text)
-            if not sentences:
-                return
-
-            # Sentence 1: race GPU vs CPU to pick this turn's winner.
-            # Audio for the first sentence flows as soon as it's synthesized
-            # (~1-2s), well under Pipecat's 3s audio-context timeout -- this
-            # is the streaming fix (no batching, no keepalive hack needed).
+            await self.push_frame(TTSStartedFrame(), direction)
             winner, pcm = await _race_turn(
                 self._state,
-                lambda: self._gpu_synthesize(sentences[0], context_id),
-                lambda: self._cpu_synthesize(sentences[0]),
+                lambda: self._gpu_synthesize(text),
+                lambda: self._cpu_synthesize(text),
             )
-            logger.info(
-                "TTS won by %s: sentence 1/%d (%d chars) -> %d PCM bytes",
-                winner, len(sentences), len(sentences[0]), len(pcm),
-            )
-            for i in range(0, len(pcm), 640):  # ~20ms chunks @ 16kHz mono 16-bit
-                yield TTSAudioRawFrame(
-                    audio=pcm[i : i + 640],
-                    sample_rate=self._out_sample_rate,
-                    num_channels=1,
-                )
-
-            # Remaining sentences: reuse the winner, no re-race per sentence.
-            for idx, sentence in enumerate(sentences[1:], start=2):
-                try:
-                    if winner == "gpu":
-                        pcm = await asyncio.wait_for(
-                            self._gpu_synthesize(sentence, context_id),
-                            timeout=WARM_TIMEOUT_S,
-                        )
-                    else:
-                        pcm = await self._cpu_synthesize(sentence)
-                except Exception:
-                    # Winner stumbled mid-stream: record it, fall back to CPU
-                    # for this sentence and stick with CPU for the remainder.
-                    if winner == "gpu":
-                        self._state.breaker.failure()
-                        self._state.gpu_warm = False
-                    logger.warning(
-                        "TTS: %s stumbled on sentence %d/%d, CPU fallback",
-                        winner, idx, len(sentences), exc_info=True,
-                    )
-                    winner = "cpu"
-                    pcm = await self._cpu_synthesize(sentence)
-                logger.info(
-                    "TTS %s: sentence %d/%d (%d chars) -> %d PCM bytes",
-                    winner, idx, len(sentences), len(sentence), len(pcm),
-                )
-                for i in range(0, len(pcm), 640):
-                    yield TTSAudioRawFrame(
+            logger.info("TTS won by %s: %d chars -> %d PCM bytes", winner, len(text), len(pcm))
+            # ~20ms chunks (640 bytes @ 16kHz mono 16-bit).
+            for i in range(0, len(pcm), 640):
+                await self.push_frame(
+                    TTSAudioRawFrame(
                         audio=pcm[i : i + 640],
                         sample_rate=self._out_sample_rate,
                         num_channels=1,
-                    )
+                    ),
+                    direction,
+                )
         except Exception as e:
-            logger.exception("RacingTTS: synthesis failed")
-            yield ErrorFrame(error=f"TTS failed: {e}")
+            logger.exception("RacingTTS: both legs failed")
+            await self.push_frame(ErrorFrame(error=f"TTS failed: {e}"), direction)
         finally:
-            await self.stop_ttfb_metrics()
-            yield TTSStoppedFrame()
+            # Flushes any buffered audio in the output transport.
+            await self.push_frame(TTSStoppedFrame(), direction)
 
-    async def _gpu_synthesize(self, text: str, context_id: str) -> bytes:
-        """Synthesize via the RunPod GPU leg; returns raw PCM16 bytes."""
+    async def _gpu_synthesize(self, text: str) -> bytes:
+        """Synthesize via the RunPod GPU leg; returns raw PCM16 bytes.
+
+        Calls RunPodQwenTTS.run_tts directly (not through the pipeline), so
+        no TTSService audio-context machinery is engaged. The context_id is
+        meaningless here; a constant is fine.
+        """
         chunks: list[bytes] = []
-        async for frame in self._gpu.run_tts(text, context_id):
+        async for frame in self._gpu.run_tts(text, "race-gpu"):
             if isinstance(frame, TTSAudioRawFrame):
                 chunks.append(frame.audio)
             elif isinstance(frame, ErrorFrame):
