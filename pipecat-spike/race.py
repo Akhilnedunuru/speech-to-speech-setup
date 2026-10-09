@@ -389,7 +389,7 @@ class RacingTTS(TTSService):
         voice_resolver=None,
         **kwargs,
     ):
-        super().__init__(sample_rate=sample_rate, **kwargs)
+        super().__init__(sample_rate=sample_rate, stop_frame_timeout_s=30.0, **kwargs)
         self._gpu = RunPodQwenTTS(
             api_key=api_key or os.environ.get("RUNPOD_API_KEY", ""),
             endpoint_id=endpoint_id or TTS_ENDPOINT_ID,
