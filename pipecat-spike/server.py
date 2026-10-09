@@ -31,6 +31,7 @@ from fastapi import FastAPI, WebSocket
 from fastapi.responses import JSONResponse
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import TextFrame, TranscriptionFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import WorkerRunner
@@ -123,7 +124,11 @@ async def run_bot(websocket: WebSocket):
     pipeline = Pipeline(
         [
             transport.input(),
-            VADProcessor(vad_analyzer=SileroVADAnalyzer()),
+            VADProcessor(
+                vad_analyzer=SileroVADAnalyzer(
+                    params=VADParams(stop_secs=0.8, start_secs=0.2, min_volume=0.6)
+                )
+            ),
             stt,
             BrainProcessor(brain),
             TimingProbe(),
