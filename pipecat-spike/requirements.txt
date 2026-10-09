@@ -1,0 +1,10 @@
+# Pipecat spike (Phase 3, step 1)
+#
+# pipecat-ai is the core framework. Extras:
+#   groq    - GroqLLMService (dedicated Groq LLM, OpenAI-compatible)
+#   silero  - Silero VAD analyzer (for VAD-bounded STT segments)
+#   websocket - FastAPI websocket transport (for later; not used by the spike test)
+pipecat-ai[groq,silero,websocket]>=0.0.100
+requests>=2.31
+numpy>=1.24
+soundfile>=0.12
