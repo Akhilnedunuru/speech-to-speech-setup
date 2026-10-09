@@ -46,6 +46,7 @@ from brain import AgenticBrain, BrainProcessor
 from groq_adapter import groq_llm_fn
 from race import RacingSTT, RacingTTS
 from voice import VoiceResolver, load_default_voice_from_env
+from raw_pcm_serializer import RawPCMSerializer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("pipecat-server")
@@ -102,6 +103,7 @@ async def run_bot(websocket: WebSocket):
             audio_in_enabled=True,
             audio_out_enabled=True,
             add_wav_header=False,
+    serializer=RawPCMSerializer(sample_rate=16000, num_channels=1),
         ),
     )
 
