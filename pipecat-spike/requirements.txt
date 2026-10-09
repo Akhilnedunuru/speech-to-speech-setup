@@ -15,3 +15,7 @@ scipy>=1.10           # resampling for the Supertonic leg (44100 -> 16000 Hz)
 # Step 4 (agentic brain): LangGraph reasoning loop
 langgraph>=1.0        # think -> act -> observe loop (tool calling)
 langchain-core>=0.3   # message types used by the brain
+# Step 5 (transport): WebSocket server
+fastapi>=0.115        # app + WebSocket endpoint
+uvicorn>=0.30         # ASGI server
+openai>=1.74          # Groq chat API client (usually pulled in by pipecat-ai)

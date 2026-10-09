@@ -22,9 +22,10 @@ testable with mocks and adaptable to any backend later:
 
 Ships with one example tool (get_weather mock). Real tools come later.
 
-Pipecat wrapper: BrainProcessor (FrameProcessor) takes TextFrames carrying
-the user transcript and emits a TextFrame with the final response. The
-pipecat import is guarded so the graph logic stays testable without it.
+Pipecat wrapper: BrainProcessor (FrameProcessor) takes user text
+(TranscriptionFrame from STT, or TextFrame) and emits a TextFrame with the
+final response. The pipecat import is guarded so the graph logic stays
+testable without it.
 """
 
 import logging
@@ -195,7 +196,7 @@ class AgenticBrain:
 # ---------------------------------------------------------------------------
 
 try:
-    from pipecat.frames.frames import TextFrame
+    from pipecat.frames.frames import TextFrame, TranscriptionFrame
     from pipecat.processors.frame_processor import FrameProcessor
 
     _PIPECAT_AVAILABLE = True
@@ -206,10 +207,11 @@ except ImportError:  # pragma: no cover - test env may lack pipecat
 if _PIPECAT_AVAILABLE:
 
     class BrainProcessor(FrameProcessor):
-        """Pipecat processor: TextFrame (user) in -> TextFrame (response) out.
+        """Pipecat processor: user text in -> response text out.
 
-        Drops into the pipeline where the LLM stage goes. Emits the final
-        response as a single TextFrame; sentence streaming is a later step.
+        Accepts TextFrame (tests / direct use) and TranscriptionFrame (STT
+        output in a real pipeline); emits the final response as a single
+        TextFrame. Sentence streaming is a later step.
         """
 
         def __init__(self, brain: "AgenticBrain", **kwargs):
@@ -219,7 +221,7 @@ if _PIPECAT_AVAILABLE:
         async def process_frame(self, frame, direction):
             await super().process_frame(frame, direction)
             # Only handle user text; pass everything else through.
-            if isinstance(frame, TextFrame):
+            if isinstance(frame, (TextFrame, TranscriptionFrame)):
                 try:
                     response = await self._brain.arun(frame.text)
                 except Exception as e:

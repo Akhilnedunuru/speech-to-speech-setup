@@ -17,9 +17,85 @@ full rebuild.
 
 ## What's NOT here (later steps)
 
-- **Transport**: no WebSocket/WebRTC yet — the test harness drives frames
-  directly. `FastAPIWebsocketTransport` is the intended transport later
-  (note: `WebsocketServerTransport` is deprecated as of Pipecat 1.4).
+- **Step 5 (transport) is now built** — see "Running the server" below.
+
+## Step 5: WebSocket transport (`server.py`)
+
+The pipeline is now talkable. One pipeline per WebSocket connection:
+
+    WebSocket PCM16 in → VADProcessor (Silero) → RacingSTT
+      → BrainProcessor (LangGraph) → TimingProbe → RacingTTS (+ VoiceResolver)
+      → WebSocket PCM16 out
+
+- `FastAPIWebsocketTransport` (the non-deprecated one;
+  `pipecat.transports.websocket.fastapi` in 1.12 — the old
+  `pipecat.transports.network.fastapi_websocket` path no longer exists).
+- **VAD is a pipeline processor in 1.x** (`VADProcessor`), not a transport
+  param — `FastAPIWebsocketParams` has no `vad_analyzer` field. It emits
+  the speech start/stop frames `SegmentedSTTService` buffers on.
+- Wire format: **binary WebSocket frames, 16kHz mono PCM16, both directions.**
+  No serializer — the telephony serializers (Twilio/Plivo) are for
+  JSON-wrapped protocols, not raw audio.
+- `groq_adapter.py` translates Groq chat completions into the brain's
+  `llm_fn` contract. Tool convention: the model replies with a lone JSON
+  object `{"tool": "get_weather", "args": {...}}` when it wants a tool
+  (fenced ```json blocks are unwrapped); anything else is spoken.
+  `{"role": "tool"}` brain messages are rewritten as user turns so any
+  chat API accepts them.
+- `VoiceResolver` is wired into `RacingTTS`, so the web UI's "Use for
+  agent" voice selection works here too — click a voice, next turn uses it.
+- Per-turn timing, production style: RacingSTT/TTS log "won by X in Ys",
+  the brain logs "Brain think: Xs -> tool/response" per LLM call and
+  "Tool loop round N" per tool execution, and `TimingProbe` logs
+  "Turn N: user said ..." / "Turn N: brain done in Xs".
+- Tool-loop silence: while the brain is in round 2+, the pipeline is
+  quiet but alive — the logs say exactly what's happening ("Tool loop
+  round N"). Filler audio ("Let me look that up...") is a later step.
+- Disconnects are caught and logged; the pipeline task ends cleanly.
+- No auth yet — localhost/dev only.
+
+Mocked tests: `python test_server.py` (adapter translation + message
+rewriting run anywhere; pipeline assembly needs pipecat).
+
+### Running the server
+
+```bash
+cd pipecat-spike
+pip install -r requirements.txt
+
+export RUNPOD_API_KEY="..."
+export GROQ_API_KEY="..."
+export REF_AUDIO_PATH="$HOME/voice-profiles/akhil/reference.wav"
+export REF_TEXT_PATH="$HOME/voice-profiles/akhil/ref_text.txt"
+# optional:
+export PIPECAT_PORT=8767   # default 8767 (production uses :8765)
+
+python server.py
+```
+
+- `GET /health` → `{"status": "ok"}`
+- `WS /ws` → binary 16kHz mono PCM16 in, same format out.
+
+Smoke test — send a WAV, save the reply (needs the `websockets` package,
+already a pipecat dependency):
+
+```python
+import asyncio, wave, websockets
+
+async def main():
+    wf = wave.open("hello.wav", "rb")  # must be 16kHz mono PCM16
+    pcm = wf.readframes(wf.getnframes())
+    async with websockets.connect("ws://localhost:8767/ws", max_size=None) as ws:
+        await ws.send(pcm)
+        out = b""
+        while len(out) < 16000 * 2 * 5:   # ~5s of reply audio
+            out += await ws.recv()
+    with wave.open("reply.wav", "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+        w.writeframes(out)
+
+asyncio.run(main())
+```
 
 ## Step 3: Voice selection (`voice.py`)
 
