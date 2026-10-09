@@ -144,6 +144,13 @@ Pipecat processors:
 - `RacingTTS(TTSService)` — RunPod Qwen3-TTS clone (GPU) vs Supertonic 3
   (CPU). Reuses `RunPodQwenTTS` from `spike.py`; the CPU leg lazily loads
   the `supertonic` package (voice via `SUPERTONIC_VOICE`, default `F1`).
+  **Streaming**: text is split into sentences (on `[.!?]`, then clause
+  boundaries for >80-char sentences, mirroring production); the first
+  sentence is raced to pick the turn's winner, then the winner synthesizes
+  the remaining sentences directly (no re-race). Audio chunks flow as each
+  sentence is ready — first sound lands in ~1-2s, satisfying Pipecat's 3s
+  audio-context timeout with no keepalive hack. If the winner stumbles
+  mid-stream, the remainder falls back to CPU.
 
 Race rules (mirroring production):
 - GPU legs get 8s (`GPU_ROUTE_TIMEOUT_S`). A cold start is ~60s, so a
@@ -155,7 +162,7 @@ Race rules (mirroring production):
   CPU leg on later turns. Idle > 240s (`GPU_WARM_IDLE_RESET_S`) → cold.
 - The losing leg keeps running in the background (warms the worker).
 
-Mocked tests: `python test_race.py` (9 tests, no network/GPU/models).
+Mocked tests: `python test_race.py` (14 tests, no network/GPU/models).
 
 ## Run
 

@@ -9,6 +9,8 @@ rule can be verified deterministically:
   - idle > 240s -> warm reset, full race again
   - warm GPU stumbles -> CPU fallback, warm cleared
   - TTS frames chunked correctly; both-legs-failed -> ErrorFrame
+  - TTS streams sentence-by-sentence (winner reused, mid-stream fallback,
+    incremental frame flow verified)
 """
 
 import asyncio
@@ -225,7 +227,7 @@ def test_tts_gpu_wins_chunks_frames():
         tts = fresh_tts()
         pcm = b"\x00\x01" * 1000  # 2000 bytes -> 4 chunks of 640/640/640/80
 
-        async def gpu(text):
+        async def gpu(text, context_id):
             return pcm
 
         async def slow_cpu(text):
@@ -235,7 +237,8 @@ def test_tts_gpu_wins_chunks_frames():
         tts._gpu_synthesize = gpu
         tts._cpu_synthesize = slow_cpu
         frames = run(collect(tts.run_tts("hello", "test-ctx")))
-        assert isinstance(frames[0], TTSStartedFrame), frames
+        # NOTE: TTSStartedFrame is pushed by base class _push_tts_frames, not
+        # by run_tts -- so frames[0] here is the first audio chunk.
         assert isinstance(frames[-1], TTSStoppedFrame), frames
         audio = [f for f in frames if isinstance(f, TTSAudioRawFrame)]
         assert len(audio) == 4, f"expected 4 chunks, got {len(audio)}"
@@ -245,6 +248,165 @@ def test_tts_gpu_wins_chunks_frames():
         print("PASS: test_tts_gpu_wins_chunks_frames")
     finally:
         restore()
+
+
+def test_tts_streams_sentences_in_order_winner_reused():
+    """Multi-sentence text: race once on sentence 1, winner reused for rest."""
+    restore = with_timeouts()
+    try:
+        tts = fresh_tts()
+        calls = []
+
+        async def gpu(text, context_id):
+            calls.append(("gpu", text))
+            return b"\xAA" * 640  # 1 chunk per sentence
+
+        async def cpu(text):
+            calls.append(("cpu", text))
+            return b"\xBB" * 640
+
+        tts._gpu_synthesize = gpu
+        tts._cpu_synthesize = cpu
+        frames = run(collect(tts.run_tts("First one. Second one! Third one?", "ctx")))
+        audio = [f for f in frames if isinstance(f, TTSAudioRawFrame)]
+        assert len(audio) == 3, f"expected 3 sentence-chunks, got {len(audio)}"
+        # GPU won the first-sentence race; it synthesizes all 3 sentences.
+        # CPU fires once as the race loser for sentence 1 (expected in a race),
+        # but its audio is never used and it is never called for sentences 2-3.
+        gpu_texts = [c[1] for c in calls if c[0] == "gpu"]
+        cpu_texts = [c[1] for c in calls if c[0] == "cpu"]
+        assert gpu_texts == ["First one.", "Second one!", "Third one?"], calls
+        assert cpu_texts == ["First one."], calls
+        assert b"".join(f.audio for f in audio) == b"\xAA" * 640 * 3
+        print("PASS: test_tts_streams_sentences_in_order_winner_reused")
+    finally:
+        restore()
+
+
+def test_tts_cpu_wins_first_sentence_uses_cpu_for_rest():
+    """CPU wins the first-sentence race -> GPU never called again."""
+    restore = with_timeouts()
+    try:
+        tts = fresh_tts()
+        calls = []
+
+        async def slow_gpu(text, context_id):
+            calls.append(("gpu", text))
+            await asyncio.sleep(5)  # timeout -> CPU wins race
+            return b"\xAA" * 640
+
+        async def cpu(text):
+            calls.append(("cpu", text))
+            return b"\xBB" * 640
+
+        tts._gpu_synthesize = slow_gpu
+        tts._cpu_synthesize = cpu
+        frames = run(collect(tts.run_tts("Alpha. Beta.", "ctx")))
+        audio = [f for f in frames if isinstance(f, TTSAudioRawFrame)]
+        assert len(audio) == 2, f"expected 2 chunks, got {len(audio)}"
+        # GPU was tried once (lost the race); 2nd sentence went straight to CPU.
+        gpu_calls = [c for c in calls if c[0] == "gpu"]
+        cpu_calls = [c for c in calls if c[0] == "cpu"]
+        assert len(gpu_calls) == 1, calls
+        assert len(cpu_calls) == 2, calls
+        assert b"".join(f.audio for f in audio) == b"\xBB" * 640 * 2
+        print("PASS: test_tts_cpu_wins_first_sentence_uses_cpu_for_rest")
+    finally:
+        restore()
+
+
+def test_tts_gpu_stumbles_midstream_falls_back_to_cpu():
+    """GPU wins sentence 1, fails on sentence 2 -> CPU takes over."""
+    restore = with_timeouts()
+    try:
+        tts = fresh_tts()
+        calls = []
+
+        async def flaky_gpu(text, context_id):
+            calls.append(("gpu", text))
+            if "Second" in text:
+                raise RuntimeError("gpu died mid-stream")
+            return b"\xAA" * 640
+
+        async def cpu(text):
+            calls.append(("cpu", text))
+            return b"\xBB" * 640
+
+        tts._gpu_synthesize = flaky_gpu
+        tts._cpu_synthesize = cpu
+        frames = run(collect(tts.run_tts("First here. Second here.", "ctx")))
+        audio = [f for f in frames if isinstance(f, TTSAudioRawFrame)]
+        assert len(audio) == 2, f"expected 2 chunks, got {len(audio)}"
+        # Sentence 1 from GPU, sentence 2 fell back to CPU.
+        assert b"".join(f.audio for f in audio) == b"\xAA" * 640 + b"\xBB" * 640
+        assert not any(isinstance(f, ErrorFrame) for f in frames), "no ErrorFrame expected"
+        print("PASS: test_tts_gpu_stumbles_midstream_falls_back_to_cpu")
+    finally:
+        restore()
+
+
+def test_tts_streams_before_full_synthesis():
+    """KEY: first-sentence audio must flow before 2nd sentence finishes.
+
+    This is what keeps Pipecat's 3s audio-context alive -- batching (waiting
+    for all sentences) would time out.
+    """
+    restore = with_timeouts()
+    try:
+        tts = fresh_tts()
+        events = []
+
+        async def gpu(text, context_id):
+            events.append(f"gpu_start:{text[:12]}")
+            if "Second" in text:
+                await asyncio.sleep(0.3)  # slow 2nd sentence
+            events.append(f"gpu_done:{text[:12]}")
+            return b"\x00\x01" * 320  # 640 bytes = 1 chunk
+
+        async def cpu(text):
+            events.append(f"cpu:{text[:12]}")
+            return b"\x02\x03" * 320
+
+        tts._gpu_synthesize = gpu
+        tts._cpu_synthesize = cpu
+
+        first_audio_seen = []
+        violation = []
+
+        async def drive():
+            async for f in tts.run_tts("First sentence here. Second sentence here.", "ctx"):
+                if isinstance(f, TTSAudioRawFrame) and not first_audio_seen:
+                    first_audio_seen.append(True)
+                    if any("gpu_start:Second" in e for e in events):
+                        violation.append(True)
+
+        run(drive())
+        assert first_audio_seen, "no audio frames were yielded at all"
+        assert not violation, (
+            "BATCHING DETECTED: 2nd sentence synthesis started before "
+            f"1st-sentence audio flowed. events={events}"
+        )
+        print("PASS: test_tts_streams_before_full_synthesis")
+    finally:
+        restore()
+
+
+def test_split_sentences():
+    from race import _split_sentences
+    assert _split_sentences("") == []
+    assert _split_sentences("Hello.") == ["Hello."]
+    assert _split_sentences("One. Two! Three?") == ["One.", "Two!", "Three?"]
+    # Long sentence (>80 chars) splits on clause boundaries
+    long_s = ("This is a deliberately long sentence designed to exceed eighty characters, "
+              "with a clause here, and another clause at the very end.")
+    assert len(long_s) > 80, len(long_s)
+    parts = _split_sentences(long_s)
+    assert len(parts) >= 2, parts
+    assert all(len(p) <= 80 for p in parts), parts
+    assert " ".join(parts) == long_s, parts
+    # No trailing punctuation still works
+    assert _split_sentences("no punctuation at all") == ["no punctuation at all"]
+    print("PASS: test_split_sentences")
 
 
 def test_both_legs_fail_yields_error_frame():
@@ -296,6 +458,11 @@ if __name__ == "__main__":
     test_idle_reset_reruns_full_race()
     test_warm_gpu_stumble_falls_back_and_clears_warm()
     test_tts_gpu_wins_chunks_frames()
+    test_tts_streams_sentences_in_order_winner_reused()
+    test_tts_cpu_wins_first_sentence_uses_cpu_for_rest()
+    test_tts_gpu_stumbles_midstream_falls_back_to_cpu()
+    test_tts_streams_before_full_synthesis()
+    test_split_sentences()
     test_both_legs_fail_yields_error_frame()
     test_race_turn_direct_breaker_open()
     print("\nAll race tests passed.")
