@@ -17,12 +17,35 @@ full rebuild.
 
 ## What's NOT here (later steps)
 
-- **Step 2**: GPU/CPU race → custom Pipecat processors with fallback
 - **Step 3**: Voice selection (`.active_voice`) → runtime profile switching
 - **Step 4**: LangGraph reasoning loop inside the LLM stage
 - **Transport**: no WebSocket/WebRTC yet — the test harness drives frames
   directly. `FastAPIWebsocketTransport` is the intended transport later
   (note: `WebsocketServerTransport` is deprecated as of Pipecat 1.4).
+
+## Step 2: GPU/CPU race (`race.py`)
+
+Ports Akhil's signature race design from `oracle/router_plugin.py` into
+Pipecat processors:
+
+- `RacingSTT(SegmentedSTTService)` — RunPod Parakeet (GPU) vs faster-whisper
+  `small.en` int8 (CPU). Reuses `RunPodParakeetSTT` from `spike.py` for the
+  GPU leg; the CPU leg lazily loads faster-whisper.
+- `RacingTTS(TTSService)` — RunPod Qwen3-TTS clone (GPU) vs Supertonic 3
+  (CPU). Reuses `RunPodQwenTTS` from `spike.py`; the CPU leg lazily loads
+  the `supertonic` package (voice via `SUPERTONIC_VOICE`, default `F1`).
+
+Race rules (mirroring production):
+- GPU legs get 8s (`GPU_ROUTE_TIMEOUT_S`). A cold start is ~60s, so a
+  timeout means "cold", not "broken" — CPU wins, breaker untouched.
+- Real GPU errors count: 3 (`GPU_ROUTE_MAX_FAILURES`) consecutive real
+  errors open the breaker for 300s (`GPU_ROUTE_COOLDOWN_S`); turns go pure
+  CPU while open.
+- Warm shortcut: GPU won quickly (< 5s `GPU_WARM_TIMEOUT_S`) → skip the
+  CPU leg on later turns. Idle > 240s (`GPU_WARM_IDLE_RESET_S`) → cold.
+- The losing leg keeps running in the background (warms the worker).
+
+Mocked tests: `python test_race.py` (9 tests, no network/GPU/models).
 
 ## Run
 

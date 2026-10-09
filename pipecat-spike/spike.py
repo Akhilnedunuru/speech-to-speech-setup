@@ -254,7 +254,12 @@ def build_services(ref_audio_b64: str, ref_text: str):
 
     # Pipecat ships a dedicated Groq service (OpenAI-compatible). No custom
     # LLM code needed — this is the idiomatic pattern.
-    llm = GroqLLMService(api_key=GROQ_API_KEY, model=GROQ_MODEL)
+    # NOTE: pass model via Settings (the plain `model=` kwarg is deprecated
+    # since 0.0.105 and warns). reasoning_effort="low" matches production.
+    llm = GroqLLMService(
+        api_key=GROQ_API_KEY,
+        settings=GroqLLMService.Settings(model=GROQ_MODEL, reasoning_effort="low"),
+    )
 
     tts = RunPodQwenTTS(
         api_key=RUNPOD_API_KEY,
