@@ -35,8 +35,10 @@ Env knobs (same names as production):
     SUPERTONIC_STEPS           CPU TTS diffusion steps (default 6)
     SUPERTONIC_STYLE_PATH      optional Voice Builder JSON for cloned CPU voice
 
-NOT in scope (later steps): voice selection (step 3), LangGraph loop
-(step 4), transport.
+NOT in scope (later steps): LangGraph loop (step 4), transport.
+Voice selection (step 3) is implemented: RacingTTS accepts an optional
+voice_resolver (see voice.py) for dynamic per-turn voice switching on the
+GPU leg.
 """
 
 import asyncio
@@ -323,6 +325,12 @@ class RacingTTS(TTSService):
 
     Reuses RunPodQwenTTS from spike.py for the GPU leg; the CPU leg is
     Supertonic 3 ONNX on CPU, lazily loaded (same as production).
+
+    Voice selection (Phase 3, step 3): pass voice_resolver=VoiceResolver()
+    and the GPU leg clones whichever voice the UI selected
+    (~/voice-profiles/.active_voice), switching mid-session with no restart.
+    The CPU leg keeps its fixed voice (SUPERTONIC_VOICE / SUPERTONIC_STYLE_PATH)
+    -- Supertonic needs a pre-built style, it can't do per-request ICL.
     """
 
     def __init__(
@@ -333,6 +341,7 @@ class RacingTTS(TTSService):
         ref_audio_b64: str = "",
         ref_text: str = "",
         sample_rate: int = 16000,
+        voice_resolver=None,
         **kwargs,
     ):
         super().__init__(sample_rate=sample_rate, **kwargs)
@@ -342,6 +351,7 @@ class RacingTTS(TTSService):
             ref_audio_b64=ref_audio_b64,
             ref_text=ref_text,
             sample_rate=sample_rate,
+            voice_resolver=voice_resolver,
         )
         self._state = _RaceState("tts")
         self._out_sample_rate = sample_rate or 16000

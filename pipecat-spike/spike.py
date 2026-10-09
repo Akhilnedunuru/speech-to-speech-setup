@@ -164,6 +164,11 @@ class RunPodQwenTTS(TTSService):
 
     Implements run_tts(text): POST text + reference voice to RunPod,
     decode the returned WAV to raw PCM, yield TTSAudioRawFrames.
+
+    Voice selection (Phase 3, step 3): pass a voice_resolver (see voice.py)
+    and the reference voice is resolved dynamically per turn from
+    ~/voice-profiles/.active_voice, falling back to the constructor's
+    ref_audio_b64/ref_text. Without a resolver, behavior is unchanged.
     """
 
     def __init__(
@@ -174,6 +179,7 @@ class RunPodQwenTTS(TTSService):
         ref_audio_b64: str,
         ref_text: str,
         sample_rate: int = 16000,
+        voice_resolver=None,
         **kwargs,
     ):
         super().__init__(sample_rate=sample_rate, **kwargs)
@@ -181,6 +187,7 @@ class RunPodQwenTTS(TTSService):
         self._endpoint_id = endpoint_id
         self._ref_audio_b64 = ref_audio_b64
         self._ref_text = ref_text
+        self._voice_resolver = voice_resolver
         # TTSService stores sample_rate as self._sample_rate (set in setup());
         # keep our own copy for use in run_tts before setup() runs.
         self._out_sample_rate = sample_rate or 16000
@@ -195,13 +202,20 @@ class RunPodQwenTTS(TTSService):
             await self.start_ttfb_metrics()
             yield TTSStartedFrame()
 
+            # Dynamic voice: re-resolve per turn so UI voice switches apply
+            # without restart. Falls back to constructor values.
+            if self._voice_resolver is not None:
+                ref_audio_b64, ref_text, _pid = self._voice_resolver.resolve()
+            else:
+                ref_audio_b64, ref_text = self._ref_audio_b64, self._ref_text
+
             output = await asyncio.to_thread(
                 _runsync,
                 self._endpoint_id,
                 {
                     "text": text,
-                    "ref_audio": self._ref_audio_b64,
-                    "ref_text": self._ref_text,
+                    "ref_audio": ref_audio_b64,
+                    "ref_text": ref_text,
                     "language": "english",
                 },
             )

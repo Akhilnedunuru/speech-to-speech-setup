@@ -17,11 +17,45 @@ full rebuild.
 
 ## What's NOT here (later steps)
 
-- **Step 3**: Voice selection (`.active_voice`) → runtime profile switching
-- **Step 4**: LangGraph reasoning loop inside the LLM stage
 - **Transport**: no WebSocket/WebRTC yet — the test harness drives frames
   directly. `FastAPIWebsocketTransport` is the intended transport later
   (note: `WebsocketServerTransport` is deprecated as of Pipecat 1.4).
+
+## Step 3: Voice selection (`voice.py`)
+
+Ports the production voice-switching from `oracle/router_plugin.py`:
+
+- `VoiceResolver` checks `~/voice-profiles/.active_voice` (written by the
+  web UI's "Use for agent" button) on each call, mtime-cached so reference
+  files are only re-read when the selection changes.
+- Falls back to `REF_AUDIO_PATH` / `REF_TEXT_PATH` when unset, empty,
+  invalid, or pointing at a missing profile (with a warning log).
+- `RunPodQwenTTS` and `RacingTTS` accept an optional `voice_resolver=`;
+  the GPU leg then clones the selected voice per turn — no restart needed.
+- **Limitation (same as production):** the CPU leg (Supertonic 3) keeps its
+  fixed voice. Supertonic needs a pre-built style JSON; only Qwen does
+  per-request zero-shot ICL.
+
+Mocked tests: `python test_voice.py` (8 tests, tmp-dir profiles).
+
+## Step 4: Agentic brain (`brain.py`)
+
+LangGraph reasoning loop for the LLM stage:
+
+    think -> [tool?] -> act -> observe -> think -> ... -> respond
+
+- `build_graph(llm_fn, tools, max_rounds=3)`: the LLM is injected as
+  `llm_fn(messages)`, keeping the graph testable and backend-agnostic.
+- **3-round cap** (voice latency): when hit mid-loop, the LLM gets one
+  final "answer now, no more tools" call instead of another tool round.
+- Ships with one mock tool (`get_weather`); real tools plug into `TOOLS`.
+- `AgenticBrain.arun(user_text)` runs one turn; `BrainProcessor`
+  (FrameProcessor) drops into a Pipecat pipeline where the LLM goes
+  (TextFrame in → TextFrame out).
+- Filler audio during tool loops ("Let me look that up...") is a later
+  step — here the loop just logs "Tool loop round N".
+
+Mocked tests: `python test_brain.py` (7 tests, scripted LLM).
 
 ## Step 2: GPU/CPU race (`race.py`)
 
